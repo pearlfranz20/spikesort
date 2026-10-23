@@ -1,12 +1,14 @@
 import numpy as np
 import pytest
 
-from spikesort import compare_to_ground_truth, linear_probe_geometry, simulate_recording, sort
+from spikesort import SortConfig, compare_to_ground_truth, linear_probe_geometry, simulate_recording, sort
 from spikesort.cluster import merge_similar, relabel_by_size, separation, split_bimodal
 from spikesort.detect import _enforce_dead_time, detect_spikes, extract_waveforms
 from spikesort.evaluate import _count_matches, isi_violation_rate, isolation_distance
 from spikesort.features import PCA
+from spikesort.matching import correlate_templates, match_templates, select_templates, shifted_template
 from spikesort.preprocess import bandpass, mad_noise
+from spikesort.simulate import spike_waveform
 
 FS = 30_000.0
 
@@ -187,3 +189,96 @@ def test_linear_probe_runs():
     s = sort(r.data, r.fs)
     c = compare_to_ground_truth(r.spike_times, r.spike_labels, s.times, s.labels, r.fs)
     assert c.accuracy.mean() > 0.8
+
+
+# Template matching (stage two)
+
+def _two_templates():
+    n_t = 54
+    a = spike_waveform(n_t, FS)
+    b = spike_waveform(n_t, FS, width_ms=0.2, repol_ratio=0.5)
+    return (100 * np.stack([a, 0.5 * a], axis=1), 70 * np.stack([0.4 * b, b], axis=1))
+
+
+def test_correlate_templates_matches_direct_sum():
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((300, 3))
+    temps = rng.standard_normal((2, 20, 3))
+    corr = correlate_templates(x, temps)
+    direct = np.array([[(x[t:t + 20] * temps[k]).sum() for t in range(281)] for k in range(2)])
+    np.testing.assert_allclose(corr, direct, atol=1e-9)
+
+
+def test_shifted_template_shifts_the_trough():
+    t_a, _ = _two_templates()
+    # A full-sample shift must equal an index shift, away from the edges.
+    np.testing.assert_allclose(shifted_template(t_a, 1.0)[2:-2], t_a[1:-3], atol=1e-6)
+    # Half a sample later, the sample after the trough reads a value between
+    # the trough and its old neighbour.
+    half = shifted_template(t_a, 0.5)
+    trough = int(np.argmin(t_a[:, 0]))
+    assert t_a[trough, 0] < half[trough + 1, 0] < t_a[trough + 1, 0]
+
+
+def test_matching_recovers_overlapping_spikes():
+    rng = np.random.default_rng(0)
+    t_a, t_b = _two_templates()
+    n_t = t_a.shape[0]
+    x = 5 * rng.standard_normal((20_000, 2))
+    truth = [(1000, 0, 0.0), (1012, 1, 0.0), (3000, 0, 0.0), (3006, 1, 0.0), (6000, 1, 0.0),
+             (8000, 0, 0.3), (12000, 1, -0.4), (12003, 0, 0.2), (15000, 0, 0.0), (15000, 1, 0.0)]
+    for start, k, shift in truth:
+        x[start:start + n_t] += shifted_template([t_a, t_b][k], shift)
+    m = match_templates(x, [t_a, t_b])
+    assert m.starts.size == len(truth)
+    got = sorted(zip(m.starts + m.shifts, m.labels, strict=True))
+    want = sorted((s + sh, k) for s, k, sh in truth)
+    for (gs, gk), (ws, wk) in zip(got, want, strict=True):
+        assert gk == wk
+        assert abs(gs - ws) < 0.5
+    assert np.all(np.abs(m.amplitudes - 1) < 0.1)
+    assert m.residual.std() < 5.3  # noise was 5
+
+
+def test_matching_fits_nothing_on_noise():
+    rng = np.random.default_rng(1)
+    t_a, t_b = _two_templates()
+    x = 5 * rng.standard_normal((60_000, 2))
+    m = match_templates(x, [t_a, t_b])
+    assert m.starts.size == 0
+    np.testing.assert_allclose(m.residual, x, rtol=1e-6)  # float32 copy, untouched
+
+
+def test_select_templates_drops_composite_cluster():
+    rng = np.random.default_rng(0)
+    t_a, t_b = _two_templates()
+    noise = np.array([4.0, 4.0])
+    clean = t_a[None] + 4 * rng.standard_normal((100, *t_a.shape))
+    shifts = rng.integers(-12, 13, size=100)
+    composite = np.stack([t_a + np.roll(t_b, s, axis=0) for s in shifts])
+    composite = composite + 4 * rng.standard_normal(clean.shape)
+    wf = np.vstack([clean, composite])
+    labels = np.repeat([0, 1], 100)
+    kept, dropped = select_templates(wf, labels, noise)
+    assert list(kept) == [0]
+    assert dropped == {1: 100}
+
+
+def test_matching_improves_collision_recall():
+    from spikesort.evaluate import collision_mask, hit_mask
+
+    rec = simulate_recording(n_units=5, duration=30, seed=0)
+    coll = collision_mask(rec.spike_times, rec.spike_labels, rec.fs)
+    assert coll.sum() > 20  # otherwise the test is meaningless
+    results = {}
+    for name, cfg in [("cluster", SortConfig(template_matching=False)), ("match", SortConfig())]:
+        s = sort(rec.data, rec.fs, cfg)
+        c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
+        hit = hit_mask(rec.spike_times, rec.spike_labels, s.times, s.labels, c, rec.fs)
+        results[name] = (c.accuracy.mean(), c.precision.min(), hit[~coll].mean(), hit[coll].mean())
+    acc, prec, iso, col = results["match"]
+    assert acc > results["cluster"][0]
+    assert acc > 0.95
+    assert prec > 0.9
+    assert iso > 0.97
+    assert col > results["cluster"][3] + 0.3

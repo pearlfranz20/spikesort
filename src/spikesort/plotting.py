@@ -124,3 +124,54 @@ def summary_figure(s: Sorting, c: Comparison | None = None):
     if c is not None:
         plot_comparison(c, ax=fig.add_subplot(gs[1, 2]))
     return fig
+
+
+def find_collision(s: Sorting, max_gap_ms: float = 1.0, after_s: float = 0.5) -> int | None:
+    """Sample index of the first pair of different-unit spikes closer than `max_gap_ms`."""
+    gap = int(round(max_gap_ms * 1e-3 * s.fs))
+    t, lab = s.times, s.labels
+    close = (np.diff(t) < gap) & (lab[1:] != lab[:-1]) & (t[:-1] > after_s * s.fs)
+    hits = np.flatnonzero(close)
+    return int(t[hits[0]]) if hits.size else None
+
+
+def plot_deconvolution(s: Sorting, centre: int | None = None, window_ms: float = 12.0, fig=None):
+    """Filtered trace, the fitted templates, and what is left over.
+
+    Centred on a resolved collision by default. Each row is one channel.
+    """
+    if s.residual is None:
+        raise ValueError("this sorting has no residual; template matching was off")
+    if centre is None:
+        centre = find_collision(s)
+    if centre is None:
+        centre = int(s.times[len(s.times) // 2]) if s.times.size else s.filtered.shape[0] // 2
+    half = int(round(window_ms * 1e-3 * s.fs / 2))
+    a, b = max(0, centre - half), min(s.filtered.shape[0], centre + half)
+    t = (np.arange(a, b) - centre) / s.fs * 1e3
+    filt = s.filtered[a:b]
+    resid = s.residual[a:b]
+    fit = filt - resid
+    n_ch = filt.shape[1]
+
+    fig = fig or plt.figure(figsize=(10, 1.1 * n_ch + 1.6), constrained_layout=True)
+    axes = fig.subplots(1, 3, sharey=True)
+    offset = 1.1 * float(np.abs(filt).max())
+    for ax, seg, title in [(axes[0], filt, "Filtered trace"),
+                           (axes[1], fit, "Fitted templates"),
+                           (axes[2], resid, "Residual")]:
+        for ch in range(n_ch):
+            ax.plot(t, seg[:, ch] - ch * offset, color="#444", lw=0.7)
+        ax.set_title(title, fontsize=10, loc="left")
+        ax.set_xlabel("time from collision (ms)", fontsize=9)
+        ax.set_yticks([])
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.tick_params(labelsize=8)
+    sel = (s.times >= a) & (s.times < b)
+    for tt, k in zip(s.times[sel], s.labels[sel], strict=True):
+        for ax in axes[:2]:
+            ax.axvline((tt - centre) / s.fs * 1e3, color=_color(k), alpha=0.5, lw=2, label=f"unit {k}")
+    handles, labels = axes[1].get_legend_handles_labels()
+    seen = dict(zip(labels, handles, strict=True))
+    axes[1].legend(seen.values(), seen.keys(), fontsize=8, frameon=False, loc="upper right")
+    return fig

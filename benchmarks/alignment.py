@@ -1,7 +1,8 @@
 """Benchmark: how much does spike alignment matter?
 
 Compares integer alignment, parabolic sub-sample refinement and
-centre-of-mass alignment across noise levels and unit counts.
+centre-of-mass alignment across noise levels and unit counts. Stage one
+only (no template matching), since alignment is a stage-one question.
 
     python benchmarks/alignment.py --out benchmarks/results
 """
@@ -33,7 +34,7 @@ def main():
         for seed in range(args.seeds):
             rec = simulate_recording(n_units=n_units, noise_uv=noise, duration=args.duration, seed=seed)
             for mode in MODES:
-                s = sort(rec.data, rec.fs, SortConfig(align=mode))
+                s = sort(rec.data, rec.fs, SortConfig(align=mode, template_matching=False))
                 c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
                 rows.append({"n_units": n_units, "noise": noise, "seed": seed, "align": mode,
                              "accuracy": float(c.accuracy.mean()), "found": s.n_units})

@@ -73,7 +73,8 @@ def extract_waveforms(
     post_ms: float = 1.2,
     align: str = "com",
     align_window_ms: float = 0.3,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_mask: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Cut a snippet around each spike, aligned to the trough.
 
     Alignment modes:
@@ -96,7 +97,9 @@ def extract_waveforms(
     so noise mostly cancels.
 
     Returns (waveforms, aligned_times) where waveforms has shape
-    (n_spikes, n_samples, n_channels). Spikes too close to the edges are dropped.
+    (n_spikes, n_samples, n_channels). Spikes too close to the edges are
+    dropped; with `return_mask` the boolean mask of kept input spikes is
+    returned as a third value.
     """
     pre = int(round(pre_ms * 1e-3 * fs))
     post = int(round(post_ms * 1e-3 * fs))
@@ -107,7 +110,7 @@ def extract_waveforms(
     offsets = np.arange(-pre, post)
     if align == "none" or times.size == 0:
         idx = times[:, None] + offsets[None, :]
-        return data[idx], times
+        return (data[idx], times, ok) if return_mask else (data[idx], times)
 
     ch = np.argmin(data[times], axis=1)
     if align == "parabola":
@@ -134,4 +137,5 @@ def extract_waveforms(
         out[:, :, c] = ndimage.map_coordinates(
             data[:, c].astype(np.float64), [coords.ravel()], order=3, mode="nearest"
         ).reshape(coords.shape)
-    return out, np.round(centre).astype(np.int64)
+    aligned = np.round(centre).astype(np.int64)
+    return (out, aligned, ok) if return_mask else (out, aligned)

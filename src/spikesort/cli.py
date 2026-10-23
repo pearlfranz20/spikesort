@@ -29,8 +29,19 @@ def _save(sorting, out: Path, comparison=None):
     fig.savefig(out / "summary.png", dpi=150)
     fig = plotting.plot_templates(sorting)
     fig.savefig(out / "templates.png", dpi=150, bbox_inches="tight")
+    if sorting.residual is not None:
+        fig = plotting.plot_deconvolution(sorting)
+        fig.savefig(out / "deconvolution.png", dpi=150)
 
-    print(f"{sorting.times.size} spikes in {sorting.n_units} units")
+    s1 = sorting.stage1
+    if sorting.matching:
+        dropped = s1.get("dropped", {})
+        drop_txt = f", {len(dropped)} dropped as composite" if dropped else ""
+        print(f"stage 1: {s1['times'].size} events in {s1['n_clusters']} clusters{drop_txt}")
+        print(f"stage 2: {sorting.matching['rounds']} matching rounds, "
+              f"{sorting.times.size} spikes in {sorting.n_units} units")
+    else:
+        print(f"{sorting.times.size} spikes in {sorting.n_units} units")
     print("unit  n_spikes  rate_hz   snr  isi_viol  iso_dist")
     for q in quality:
         print(f"{q['unit']:>4}  {q['n_spikes']:>8}  {q['rate_hz']:>7.2f}  {q['snr']:>4.1f}  "
@@ -49,6 +60,7 @@ def main(argv=None):
     d.add_argument("--probe", choices=["tetrode", "linear"], default="tetrode")
     d.add_argument("--seed", type=int, default=0)
     d.add_argument("--split", action="store_true", help="enable the bimodal split pass")
+    d.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     d.add_argument("--out", type=Path, default=Path("results"))
 
     s = sub.add_parser("sort", help="sort a .npy array of shape (n_samples, n_channels)")
@@ -56,6 +68,7 @@ def main(argv=None):
     s.add_argument("--fs", type=float, required=True)
     s.add_argument("--threshold", type=float, default=5.0)
     s.add_argument("--cmr", action="store_true", help="common median reference")
+    s.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     s.add_argument("--out", type=Path, default=Path("results"))
 
     args = p.parse_args(argv)
@@ -64,7 +77,9 @@ def main(argv=None):
         geom = tetrode_geometry() if args.probe == "tetrode" else linear_probe_geometry()
         rec = simulate_recording(n_units=args.units, duration=args.duration,
                                  noise_uv=args.noise, channel_positions=geom, seed=args.seed)
-        sorting = sort(rec.data, rec.fs, SortConfig(seed=args.seed, split_dprime=4.0 if args.split else None))
+        cfg = SortConfig(seed=args.seed, split_dprime=4.0 if args.split else None,
+                         template_matching=not args.no_matching)
+        sorting = sort(rec.data, rec.fs, cfg)
         comp = compare_to_ground_truth(rec.spike_times, rec.spike_labels,
                                        sorting.times, sorting.labels, rec.fs)
         _save(sorting, args.out, comp)
@@ -72,7 +87,8 @@ def main(argv=None):
         print(comp.summary())
     else:
         data = np.load(args.path)
-        cfg = SortConfig(threshold=args.threshold, use_cmr=args.cmr)
+        cfg = SortConfig(threshold=args.threshold, use_cmr=args.cmr,
+                         template_matching=not args.no_matching)
         _save(sort(data, args.fs, cfg), args.out)
 
 

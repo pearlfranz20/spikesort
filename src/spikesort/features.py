@@ -39,6 +39,14 @@ class PCA:
         return self.fit(X).transform(X)
 
 
+def apply_features(waveforms: np.ndarray, models: list[PCA], per_channel: bool) -> np.ndarray:
+    """Project new waveforms onto PCA models fitted by `waveform_features`."""
+    n, t, c = waveforms.shape
+    if not per_channel:
+        return models[0].transform(waveforms.reshape(n, t * c))
+    return np.hstack([m.transform(waveforms[:, :, ch]) for ch, m in enumerate(models)])
+
+
 def waveform_features(waveforms: np.ndarray, n_components: int = 3,
                       per_channel: bool = True) -> tuple[np.ndarray, list[PCA]]:
     """PCA features from multichannel waveforms.

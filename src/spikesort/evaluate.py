@@ -137,3 +137,37 @@ def isolation_distance(features: np.ndarray, labels: np.ndarray, k: int) -> floa
     d = outside - mu
     d2 = np.einsum("ij,jk,ik->i", d, cov_inv, d)
     return float(np.partition(d2, n - 1)[n - 1])
+
+
+# Per-spike analysis: which ground-truth spikes were recovered, and were
+# they isolated or overlapping another unit's spike?
+
+def collision_mask(times: np.ndarray, labels: np.ndarray, fs: float,
+                   window_ms: float = 1.0) -> np.ndarray:
+    """True for each spike that has a spike from a different unit within the window."""
+    w = int(round(window_ms * 1e-3 * fs))
+    order = np.argsort(times, kind="stable")
+    t, lab = times[order], labels[order]
+    lo = np.searchsorted(t, t - w, side="left")
+    hi = np.searchsorted(t, t + w, side="right")
+    out = np.array([np.any(lab[a:b] != lab[i]) for i, (a, b) in enumerate(zip(lo, hi, strict=True))])
+    result = np.empty_like(out)
+    result[order] = out
+    return result
+
+
+def hit_mask(gt_times: np.ndarray, gt_labels: np.ndarray, sorted_times: np.ndarray,
+             sorted_labels: np.ndarray, comparison: Comparison, fs: float,
+             delta_ms: float = 0.4) -> np.ndarray:
+    """True for each ground-truth spike that has a spike of its matched sorted unit within delta."""
+    delta = int(round(delta_ms * 1e-3 * fs))
+    out = np.zeros(gt_times.size, dtype=bool)
+    for u, k in comparison.assignment.items():
+        if k is None:
+            continue
+        idx = np.flatnonzero(gt_labels == u)
+        s = np.sort(sorted_times[sorted_labels == k])
+        lo = np.searchsorted(s, gt_times[idx] - delta, side="left")
+        hi = np.searchsorted(s, gt_times[idx] + delta, side="right")
+        out[idx] = hi > lo
+    return out
