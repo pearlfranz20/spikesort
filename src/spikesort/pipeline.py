@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .cluster import gmm_cluster, merge_similar, split_bimodal, templates_from_labels
-from .detect import detect_spikes, extract_waveforms
+from .detect import detect_spikes, detect_spikes_combined, extract_waveforms
+from .drift import DriftEstimate, estimate_drift, shift_channels, spike_depths
 from .evaluate import isi_violation_rate, isolation_distance, snr
 from .features import apply_features, waveform_features
 from .matching import match_templates, select_templates
@@ -24,8 +25,9 @@ class SortConfig:
     low_hz: float = 300.0
     high_hz: float = 6000.0
     use_cmr: bool = False
+    detect_method: str = "combined"  # "combined", "energy" or "threshold"
     threshold: float = 5.0
-    dead_time_ms: float = 1.0
+    dead_time_ms: float = 1.0  # for the single detectors; "combined" uses 1 ms and 2 ms
     pre_ms: float = 0.6
     post_ms: float = 1.2
     align: str = "com"  # "com", "parabola" or "none"
@@ -35,7 +37,7 @@ class SortConfig:
     merge_corr: float = 0.97
     merge_amp_ratio: float = 0.85
     merge_dprime: float = 2.5
-    split_dprime: float | None = None  # opt-in, see README benchmarks
+    split_dprime: float | None = 4.0  # held-out d' to split a cluster hiding two units; None disables
     template_matching: bool = True
     match_threshold: float = 0.1
     match_min_z: float = 5.0
@@ -44,6 +46,12 @@ class SortConfig:
     template_post_ms: float = 2.0  # stage-two templates run longer, to cover the rebound
     min_template_spikes: int = 10
     max_outlier_frac: float = 0.5
+    drift_correction: bool = False  # needs channel_positions, see drift.py
+    drift_axis: tuple[float, float] = (0.0, 1.0)
+    drift_bin_s: float = 2.0
+    drift_max_um: float = 60.0
+    drift_kernel_um: float | None = None  # default: nearest-channel spacing
+    drift_passes: int = 2  # re-estimate on corrected data; the centre of mass under-reads motion
     seed: int = 0
 
 
@@ -73,6 +81,7 @@ class Sorting:
     residual: np.ndarray | None = None  # filtered minus every fitted template
     stage1: dict = field(default_factory=dict)  # detection and clustering before matching
     matching: dict = field(default_factory=dict)
+    drift: DriftEstimate | None = None  # set when drift correction ran; `filtered` is then corrected
 
     @property
     def n_units(self) -> int:
@@ -94,17 +103,27 @@ class Sorting:
         return rows
 
 
-def sort(data: np.ndarray, fs: float, config: SortConfig | None = None) -> Sorting:
-    """Sort a (n_samples, n_channels) recording."""
+def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
+         channel_positions: np.ndarray | None = None) -> Sorting:
+    """Sort a (n_samples, n_channels) recording.
+
+    `channel_positions` (n_channels, 2) in microns is only needed for
+    drift correction.
+    """
     cfg = config or SortConfig()
 
     x = bandpass(data, fs, cfg.low_hz, cfg.high_hz)
     if cfg.use_cmr:
         x = common_median_reference(x)
+
+    drift = None
+    if cfg.drift_correction:
+        if channel_positions is None:
+            raise ValueError("drift correction needs channel_positions")
+        x, drift = correct_drift(x, fs, np.asarray(channel_positions, dtype=float), cfg)
     noise = mad_noise(x)
 
-    times = detect_spikes(x, fs, threshold=cfg.threshold,
-                          dead_time_ms=cfg.dead_time_ms, noise=noise)
+    times = _detect(x, fs, noise, cfg)
     wf, times = extract_waveforms(x, times, fs, cfg.pre_ms, cfg.post_ms, align=cfg.align)
     feats, models = waveform_features(wf, cfg.n_pcs, per_channel=cfg.per_channel_pca)
 
@@ -116,7 +135,7 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None) -> Sorti
     stage1 = {"times": times, "labels": labels, "n_clusters": len(cluster_templates)}
 
     common = dict(noise=noise, filtered=x, bic=bic, fs=fs, n_pcs=cfg.n_pcs,
-                  per_channel_pca=cfg.per_channel_pca, stage1=stage1)
+                  per_channel_pca=cfg.per_channel_pca, stage1=stage1, drift=drift)
     if not cfg.template_matching or times.size == 0:
         return Sorting(times, labels, wf, feats, cluster_templates, **common)
 
@@ -147,3 +166,39 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None) -> Sorti
             "n_matched": int(times2.size)}
     return Sorting(times2, labels2, wf2, feats2, templates2, amplitudes=amps,
                    residual=m.residual.astype(np.float32), matching=info, **common)
+
+
+def _detect(x: np.ndarray, fs: float, noise: np.ndarray | None, cfg: SortConfig) -> np.ndarray:
+    if cfg.detect_method == "combined":
+        return detect_spikes_combined(x, fs, cfg.threshold, noise)
+    return detect_spikes(x, fs, cfg.threshold, cfg.dead_time_ms, noise=noise, method=cfg.detect_method)
+
+
+def correct_drift(x: np.ndarray, fs: float, channel_positions: np.ndarray,
+                  cfg: SortConfig) -> tuple[np.ndarray, DriftEstimate]:
+    """Estimate probe drift from a detection pass and undo it in `x`.
+
+    The depth estimator under-reads motion by about 10%, so a second pass
+    on the corrected data picks up most of the remainder. The passes'
+    estimates are summed and the original data shifted once by the total.
+    """
+    axis = np.asarray(cfg.drift_axis, dtype=float)
+    axis /= np.linalg.norm(axis)
+    n = x.shape[0]
+    t_all = np.arange(n) / fs
+    total = np.zeros(n)
+    corrected = x
+    est = None
+    for _ in range(max(1, cfg.drift_passes)):
+        times = _detect(corrected, fs, None, cfg)
+        wf, times = extract_waveforms(corrected, times, fs, cfg.pre_ms, cfg.post_ms, align="none")
+        depths, amps = spike_depths(wf, channel_positions, axis)
+        this = estimate_drift(times / fs, depths, amps, n / fs, bin_s=cfg.drift_bin_s,
+                              max_shift_um=cfg.drift_max_um)
+        total += this.at(t_all)
+        if est is None:
+            est = this
+        else:
+            est.displacement_um = est.displacement_um + this.displacement_um
+        corrected = shift_channels(x, channel_positions, total, axis, cfg.drift_kernel_um)
+    return corrected, est

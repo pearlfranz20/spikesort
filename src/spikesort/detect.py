@@ -1,50 +1,117 @@
-"""Threshold-based spike detection and waveform extraction."""
+"""Spike detection and waveform extraction."""
 
 from __future__ import annotations
 
 import numpy as np
-from scipy import ndimage
+from scipy import ndimage, signal
 
 from .preprocess import mad_noise
+
+
+def smooth_for_detection(data: np.ndarray, fs: float, width_ms: float = 0.12) -> np.ndarray:
+    """Correlate each channel with a unit-norm Gaussian pulse of the given width.
+
+    A generic matched filter: the pulse roughly matches a spike trough, so
+    the output's signal-to-noise ratio is about two to three times that of
+    a single sample, while the noise stays zero-mean. Zero phase, so
+    troughs do not move.
+    """
+    n = int(round(4 * width_ms * 1e-3 * fs)) | 1
+    t = (np.arange(n) - n // 2) / fs * 1e3
+    g = np.exp(-0.5 * (t / width_ms) ** 2)
+    g /= np.linalg.norm(g)
+    return signal.fftconvolve(data, g[:, None], mode="same", axes=0).astype(np.float32)
 
 
 def detect_spikes(
     data: np.ndarray,
     fs: float,
     threshold: float = 5.0,
-    dead_time_ms: float = 1.0,
+    dead_time_ms: float = 2.0,
     align_window_ms: float = 0.5,
     noise: np.ndarray | None = None,
+    method: str = "energy",
+    smooth_ms: float = 0.12,
+    channel_min: float = 4.5,
 ) -> np.ndarray:
-    """Detect negative threshold crossings on any channel.
+    """Detect spikes as negative deflections, on any channel.
 
-    Each channel is normalised by its MAD noise, so `threshold` is in units
-    of sigma. A spike is an event where the minimum across channels drops
-    below -threshold. Events are aligned to the trough within
-    `align_window_ms`, and events closer than `dead_time_ms` are merged,
-    keeping the deepest one.
+    ``method="threshold"``: the classic detector. Each channel is divided
+    by its MAD noise and an event is any sample where the minimum across
+    channels drops below -threshold.
 
-    Returns sorted sample indices of spike troughs.
+    ``method="energy"`` (default): each channel is first smoothed with a
+    generic spike-shaped pulse (`smooth_for_detection`) and normalised by
+    the MAD of the result, which gains two to three times in
+    signal-to-noise. The negative deflections are then combined across
+    channels as sqrt(sum of squares), and an event needs that combined
+    score above `threshold` and at least one channel above `channel_min`.
+    The per-channel floor matters: the band-pass filter leaves a shallow
+    undershoot 1 to 2 ms after every large spike, coherent across channels,
+    and the combined score alone fires on it.
+
+    Events are placed at the trough (or score peak) within `align_window_ms`
+    of the crossing, and events closer than `dead_time_ms` are merged,
+    keeping the deepest. Two milliseconds is deliberate for stage one: it
+    also suppresses what is left of the undershoot. Overlapping spikes are
+    stage two's job.
+
+    Returns sorted sample indices.
     """
-    if noise is None:
-        noise = mad_noise(data)
-    z = data / noise[None, :]
-    zmin = z.min(axis=1)
+    if method == "threshold":
+        if noise is None:
+            noise = mad_noise(data)
+        score = -(data / noise[None, :]).min(axis=1)
+        above = score > threshold
+    elif method == "energy":
+        y = smooth_for_detection(data, fs, smooth_ms)
+        z = -y / mad_noise(y)[None, :]
+        score = np.sqrt((np.clip(z, 0, None) ** 2).sum(axis=1))
+        above = (score > threshold) & (z.max(axis=1) > channel_min)
+    else:
+        raise ValueError(f"unknown detection method {method!r}")
 
-    below = zmin < -threshold
     # Rising edges of the boolean mask are the crossing onsets.
-    onsets = np.flatnonzero(below[1:] & ~below[:-1]) + 1
-    if below[0]:
+    onsets = np.flatnonzero(above[1:] & ~above[:-1]) + 1
+    if above[0]:
         onsets = np.r_[0, onsets]
 
     win = max(1, int(round(align_window_ms * 1e-3 * fs)))
-    n = zmin.size
-    troughs = np.empty(onsets.size, dtype=np.int64)
+    n = score.size
+    peaks = np.empty(onsets.size, dtype=np.int64)
     for i, o in enumerate(onsets):
-        stop = min(n, o + win)
-        troughs[i] = o + int(np.argmin(zmin[o:stop]))
+        peaks[i] = o + int(np.argmax(score[o:min(n, o + win)]))
 
-    return _enforce_dead_time(troughs, zmin, int(round(dead_time_ms * 1e-3 * fs)))
+    return _enforce_dead_time(peaks, -score, int(round(dead_time_ms * 1e-3 * fs)))
+
+
+def detect_spikes_combined(
+    data: np.ndarray,
+    fs: float,
+    threshold: float = 5.0,
+    noise: np.ndarray | None = None,
+    threshold_dead_ms: float = 1.0,
+    energy_dead_ms: float = 2.0,
+    merge_ms: float = 1.0,
+) -> np.ndarray:
+    """Union of the threshold and energy detectors.
+
+    The threshold detector with a 1 ms dead time keeps collision partners
+    for the clusterer to see. The energy detector with a 2 ms dead time
+    finds small spikes while suppressing the filter undershoot after big
+    ones. Energy events within `merge_ms` of a threshold event are
+    dropped as duplicates; the rest are added.
+    """
+    a = detect_spikes(data, fs, threshold, threshold_dead_ms, noise=noise, method="threshold")
+    b = detect_spikes(data, fs, threshold, energy_dead_ms, noise=noise, method="energy")
+    if a.size == 0:
+        return b
+    if b.size == 0:
+        return a
+    gap = int(round(merge_ms * 1e-3 * fs))
+    i = np.clip(np.searchsorted(a, b), 1, a.size - 1)
+    near = np.minimum(np.abs(a[i] - b), np.abs(a[i - 1] - b)) <= gap
+    return np.union1d(a, b[~near])
 
 
 def _enforce_dead_time(times: np.ndarray, zmin: np.ndarray, dead: int) -> np.ndarray:

@@ -62,8 +62,11 @@ def test_detects_isolated_spikes_at_the_trough():
     x += np.random.default_rng(1).standard_normal(x.shape).astype(np.float32)
     for t in (500, 1500, 2500):
         x[t - 2:t + 3, 1] -= np.array([10, 20, 30, 20, 10])
-    found = detect_spikes(x, FS, threshold=5)
+    found = detect_spikes(x, FS, threshold=5, method="threshold")
     np.testing.assert_array_equal(found, [500, 1500, 2500])
+    found = detect_spikes(x, FS, threshold=5, method="energy")
+    assert found.size == 3
+    assert np.abs(found - [500, 1500, 2500]).max() <= 1
 
 
 def test_dead_time_keeps_deepest_event():
@@ -282,3 +285,78 @@ def test_matching_improves_collision_recall():
     assert prec > 0.9
     assert iso > 0.97
     assert col > results["cluster"][3] + 0.3
+
+
+# Drift
+
+def test_static_recording_is_unchanged_by_motion_support():
+    import hashlib
+
+    rec = simulate_recording(n_units=3, duration=2, seed=7)
+    assert hashlib.md5(rec.data.tobytes()).hexdigest()[:12] == "9e9c9934af29"
+    assert rec.motion_um is None
+    np.testing.assert_allclose(rec.template_at(0, 1.0), rec.templates[0])
+
+
+def test_motion_changes_amplitude_profile_over_time():
+    geom = linear_probe_geometry(16)
+    rec = simulate_recording(n_units=3, duration=10, seed=1, channel_positions=geom,
+                             motion_um=20, unit_margin_um=-30)
+    early, late = rec.template_at(0, 0.0), rec.template_at(0, 10.0 / 6)  # peak of the sine
+    assert np.abs(rec.motion_at(10.0 / 6) - 20) < 0.5
+    assert not np.allclose(early, late)
+    # The unit's footprint slides along the shank: the deepest channel moves.
+    assert early.min(axis=0).argmin() != late.min(axis=0).argmin()
+
+
+def test_register_sign_and_subbin_precision():
+    from spikesort.drift import _register
+
+    g = np.exp(-0.5 * ((np.arange(200) - 80) / 5.0) ** 2)
+    lag, corr = _register(g, np.roll(g, 7), 30)
+    assert abs(lag - 7) < 0.05
+    assert corr > 0.99
+
+
+def test_shift_channels_undoes_a_shifted_field():
+    from spikesort.drift import shift_channels
+
+    pos = linear_probe_geometry(8, 20.0)
+    y = pos[:, 1]
+    bump = lambda y0: np.exp(-0.5 * ((y - y0) / 25.0) ** 2)  # noqa: E731
+    drifted = bump(78.0)[None, :]
+    back = shift_channels(drifted, pos, np.array([8.0]), np.array([0.0, 1.0]))
+    np.testing.assert_allclose(back[0], bump(70.0), atol=1e-3)
+
+
+def test_estimate_drift_recovers_a_sine():
+    from spikesort.drift import estimate_drift
+
+    rng = np.random.default_rng(0)
+    duration, n = 60.0, 3000
+    t = np.sort(rng.uniform(0, duration, n))
+    unit = rng.integers(0, 4, n)
+    true = 15 * np.sin(2 * np.pi * 1.5 * t / duration)
+    depth = np.array([30.0, 60.0, 95.0, 120.0])[unit] + true + rng.normal(0, 2.0, n)
+    amp = np.array([80.0, 120.0, 60.0, 150.0])[unit] * rng.uniform(0.9, 1.1, n)
+    est = estimate_drift(t, depth, amp, duration, bin_s=2.0)
+    want = 15 * np.sin(2 * np.pi * 1.5 * est.bin_centres_s / duration)
+    want -= want.mean()
+    assert np.sqrt(np.mean((est.displacement_um - want) ** 2)) < 1.0
+
+
+def test_drift_correction_restores_accuracy():
+    geom = linear_probe_geometry(16)
+    rec = simulate_recording(n_units=5, duration=16, seed=0, channel_positions=geom,
+                             motion_um=20, unit_margin_um=-30)
+    results = {}
+    for corrected in [False, True]:
+        s = sort(rec.data, rec.fs, SortConfig(drift_correction=corrected), channel_positions=geom)
+        c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
+        results[corrected] = c.accuracy.mean()
+        if corrected:
+            true = -rec.motion_at(s.drift.bin_centres_s)
+            true = true - true.mean()
+            assert np.sqrt(np.mean((s.drift.displacement_um - true) ** 2)) < 4.0
+    assert results[True] > 0.9
+    assert results[True] > results[False] + 0.15

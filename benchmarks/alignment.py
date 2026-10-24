@@ -2,7 +2,9 @@
 
 Compares integer alignment, parabolic sub-sample refinement and
 centre-of-mass alignment across noise levels and unit counts. Stage one
-only (no template matching), since alignment is a stage-one question.
+only (no template matching, no split pass) with the classic threshold
+detector, since alignment is a stage-one question and the table predates
+the energy detector and the split pass.
 
     python benchmarks/alignment.py --out benchmarks/results
 """
@@ -34,7 +36,9 @@ def main():
         for seed in range(args.seeds):
             rec = simulate_recording(n_units=n_units, noise_uv=noise, duration=args.duration, seed=seed)
             for mode in MODES:
-                s = sort(rec.data, rec.fs, SortConfig(align=mode, template_matching=False))
+                cfg = SortConfig(align=mode, template_matching=False, detect_method="threshold",
+                                 dead_time_ms=1.0, split_dprime=None)
+                s = sort(rec.data, rec.fs, cfg)
                 c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
                 rows.append({"n_units": n_units, "noise": noise, "seed": seed, "align": mode,
                              "accuracy": float(c.accuracy.mean()), "found": s.n_units})

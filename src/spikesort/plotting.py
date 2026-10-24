@@ -175,3 +175,45 @@ def plot_deconvolution(s: Sorting, centre: int | None = None, window_ms: float =
     seen = dict(zip(labels, handles, strict=True))
     axes[1].legend(seen.values(), seen.keys(), fontsize=8, frameon=False, loc="upper right")
     return fig
+
+
+def plot_drift(s: Sorting, true_displacement=None, fig=None, max_points: int = 20000):
+    """Spike depth against time, before and after drift correction.
+
+    Left: every detected spike at its estimated depth, with the estimated
+    displacement drawn through the middle of the array (and the true one,
+    if given). Right: the same spikes with the estimate subtracted, which
+    is what the sorter sees after correction.
+
+    `true_displacement` is a callable from times in seconds to microns, in
+    the same convention as the estimate (the apparent shift of spikes).
+    """
+    if s.drift is None:
+        raise ValueError("this sorting has no drift estimate")
+    d = s.drift
+    rng = np.random.default_rng(0)
+    idx = rng.permutation(d.times_s.size)[:max_points]
+    t, depth, amp = d.times_s[idx], d.depths[idx], d.amplitudes[idx]
+    shade = np.clip(amp / np.percentile(amp, 95), 0.15, 1.0)
+    grey = 0.75 * (1 - shade)
+    colors = np.column_stack([grey, grey, grey, np.full_like(shade, 0.7)])
+    mid = 0.5 * (d.depths.min() + d.depths.max())
+
+    fig = fig or plt.figure(figsize=(11, 3.8), constrained_layout=True)
+    axes = fig.subplots(1, 2, sharey=True)
+    axes[0].scatter(t, depth, s=2, c=colors, lw=0)
+    axes[0].plot(d.bin_centres_s, mid + d.displacement_um, color="#2a6fdb", lw=1.6, label="estimated")
+    if true_displacement is not None:
+        tt = np.linspace(0, d.bin_centres_s[-1] + d.bin_centres_s[0], 400)
+        true = np.asarray(true_displacement(tt), dtype=float)
+        true = true - true.mean()
+        axes[0].plot(tt, mid + true, color="#e0782b", lw=1.2, ls="--", label="true")
+    axes[0].legend(fontsize=8, frameon=False, loc="upper right")
+    axes[0].set_title("Spike depths, raw (darker = larger spike)", fontsize=10, loc="left")
+    axes[1].scatter(t, depth - d.at(t), s=2, c=colors, lw=0)
+    axes[1].set_title("After subtracting the estimated drift", fontsize=10, loc="left")
+    for ax in axes:
+        ax.set_xlabel("time (s)", fontsize=9)
+        _style(ax)
+    axes[0].set_ylabel("depth along probe (um)", fontsize=9)
+    return fig

@@ -59,7 +59,9 @@ def main(argv=None):
     d.add_argument("--noise", type=float, default=10.0, help="noise SD in microvolts")
     d.add_argument("--probe", choices=["tetrode", "linear"], default="tetrode")
     d.add_argument("--seed", type=int, default=0)
-    d.add_argument("--split", action="store_true", help="enable the bimodal split pass")
+    d.add_argument("--no-split", action="store_true", help="disable the bimodal split pass")
+    d.add_argument("--motion", type=float, default=0.0, help="peak probe motion in microns")
+    d.add_argument("--drift-correction", action="store_true", help="estimate and undo probe drift")
     d.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     d.add_argument("--out", type=Path, default=Path("results"))
 
@@ -69,17 +71,27 @@ def main(argv=None):
     s.add_argument("--threshold", type=float, default=5.0)
     s.add_argument("--cmr", action="store_true", help="common median reference")
     s.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
+    s.add_argument("--positions", type=Path, default=None,
+                   help=".npy of channel positions (n_channels, 2) in microns, enables drift correction")
     s.add_argument("--out", type=Path, default=Path("results"))
 
     args = p.parse_args(argv)
 
     if args.cmd == "demo":
-        geom = tetrode_geometry() if args.probe == "tetrode" else linear_probe_geometry()
-        rec = simulate_recording(n_units=args.units, duration=args.duration,
-                                 noise_uv=args.noise, channel_positions=geom, seed=args.seed)
-        cfg = SortConfig(seed=args.seed, split_dprime=4.0 if args.split else None,
-                         template_matching=not args.no_matching)
-        sorting = sort(rec.data, rec.fs, cfg)
+        geom = tetrode_geometry() if args.probe == "tetrode" else linear_probe_geometry(16)
+        margin = 15.0 if args.probe == "tetrode" else -30.0
+        rec = simulate_recording(n_units=args.units, duration=args.duration, noise_uv=args.noise,
+                                 channel_positions=geom, seed=args.seed, motion_um=args.motion,
+                                 unit_margin_um=margin)
+        cfg = SortConfig(seed=args.seed, split_dprime=None if args.no_split else 4.0,
+                         template_matching=not args.no_matching, drift_correction=args.drift_correction)
+        sorting = sort(rec.data, rec.fs, cfg, channel_positions=geom)
+        if sorting.drift is not None:
+            from . import plotting
+
+            args.out.mkdir(parents=True, exist_ok=True)
+            fig = plotting.plot_drift(sorting, true_displacement=lambda t: -rec.motion_at(t))
+            fig.savefig(args.out / "drift_map.png", dpi=150)
         comp = compare_to_ground_truth(rec.spike_times, rec.spike_labels,
                                        sorting.times, sorting.labels, rec.fs)
         _save(sorting, args.out, comp)
@@ -87,9 +99,11 @@ def main(argv=None):
         print(comp.summary())
     else:
         data = np.load(args.path)
+        positions = np.load(args.positions) if args.positions is not None else None
         cfg = SortConfig(threshold=args.threshold, use_cmr=args.cmr,
-                         template_matching=not args.no_matching)
-        _save(sort(data, args.fs, cfg), args.out)
+                         template_matching=not args.no_matching,
+                         drift_correction=positions is not None)
+        _save(sort(data, args.fs, cfg, channel_positions=positions), args.out)
 
 
 if __name__ == "__main__":
