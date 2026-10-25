@@ -84,12 +84,64 @@ def _dprime(fit_a: np.ndarray, fit_b: np.ndarray, test_a: np.ndarray, test_b: np
     return float(abs(pb.mean() - pa.mean()) / pooled)
 
 
+def gap_ratio(waveforms: np.ndarray, labels: np.ndarray, a: int, b: int, seed: int = 0) -> float:
+    """How deep the density valley is between two clusters, 0 (empty gap) to about 1 (none).
+
+    Both clusters are projected onto the axis joining their means (axis
+    from one random half of each, projection of the other halves, so the
+    projection is not flattered by the axis having been fitted to it).
+    A kernel density of the pooled projection is averaged over the middle
+    third of the stretch between the two medians and over its outer
+    thirds; the ratio is middle over outer.
+
+    Two neurons give a valley. One neuron whose amplitude slid
+    continuously during the recording, which a Gaussian mixture cuts into
+    two or three bands, gives a flat top: the bands are adjacent slices of
+    a continuum with no gap between them. In practice, with 300 spikes per
+    cluster, two Gaussians at d' = 3 read 0.75 to 1.1, at d' = 4 about
+    0.55, and a continuum cut in half 0.9 to 1.1, so the test separates
+    clearly distinct neurons from a continuum but not marginal ones.
+    """
+    wa = waveforms[labels == a].reshape(np.sum(labels == a), -1)
+    wb = waveforms[labels == b].reshape(np.sum(labels == b), -1)
+    if wa.shape[0] < 8 or wb.shape[0] < 8:
+        return 0.0
+    rng = np.random.default_rng(seed)
+    ia, ib = rng.permutation(wa.shape[0]), rng.permutation(wb.shape[0])
+    fa, ta = wa[ia[: ia.size // 2]], wa[ia[ia.size // 2:]]
+    fb, tb = wb[ib[: ib.size // 2]], wb[ib[ib.size // 2:]]
+    axis = fb.mean(axis=0) - fa.mean(axis=0)
+    norm = np.linalg.norm(axis)
+    if norm == 0:
+        return 1.0
+    axis /= norm
+    pa, pb = ta @ axis, tb @ axis
+    pooled = np.concatenate([pa, pb])
+    sd = np.sqrt((pa.var() + pb.var()) / 2) + 1e-9
+    bw = sd / 2
+    ma, mb = np.median(pa), np.median(pb)
+    if mb < ma:
+        ma, mb = mb, ma
+    span = mb - ma
+    grid = ma + span * np.linspace(0.0, 1.0, 21)
+    dens = np.array([np.exp(-0.5 * ((pooled - g) / bw) ** 2).sum() for g in grid])
+    # Mean density over the middle third of the segment between the two
+    # medians, against the mean over the outer thirds. Averaging over a
+    # stretch rather than reading single points keeps kernel noise from
+    # inventing or hiding a valley.
+    middle = dens[7:14].mean()
+    outer = np.concatenate([dens[:7], dens[14:]]).mean()
+    return float(middle / max(outer, 1e-12))
+
+
 def merge_similar(
     waveforms: np.ndarray,
     labels: np.ndarray,
     corr_threshold: float = 0.97,
     amp_ratio_threshold: float = 0.85,
     dprime_threshold: float = 2.5,
+    gap_threshold: float | None = None,
+    gap_amp_ratio_threshold: float = 0.5,
 ) -> np.ndarray:
     """Merge clusters that look like the same neuron.
 
@@ -102,8 +154,17 @@ def merge_similar(
     * their spike clouds overlap, i.e. `separation` is below `dprime_threshold`.
 
     The last check matters at low noise, where two different neurons can have
-    near-identical templates yet perfectly separable clusters. Repeats until
-    nothing else merges. Returned labels are renumbered 0..K-1 by size.
+    near-identical templates yet perfectly separable clusters.
+
+    A second route, off by default, is meant for a neuron that drifted:
+    same shape, amplitudes within `gap_amp_ratio_threshold` (drift can
+    change the amplitude a lot), and no density gap between the clouds
+    (`gap_ratio` above `gap_threshold`, 0.85 is a reasonable value). It is
+    off because with a few hundred spikes per cluster the gap ratio of two
+    neurons at d' of 3 overlaps that of a continuum, and because a neuron
+    under oscillating drift dwells at the extremes and has a real gap.
+
+    Repeats until nothing else merges. Returned labels are renumbered 0..K-1 by size.
     """
     labels = labels.copy()
     while True:
@@ -116,9 +177,13 @@ def merge_similar(
                 r = np.corrcoef(ta, tb)[0, 1]
                 pa, pb = -temps[a].min(), -temps[b].min()
                 ratio = min(pa, pb) / max(pa, pb)
-                if r <= corr_threshold or ratio <= amp_ratio_threshold:
+                if r <= corr_threshold or ratio <= gap_amp_ratio_threshold:
                     continue
-                if separation(waveforms, labels, a, b) >= dprime_threshold:
+                overlap = (ratio > amp_ratio_threshold
+                           and separation(waveforms, labels, a, b) < dprime_threshold)
+                continuum = (gap_threshold is not None
+                             and gap_ratio(waveforms, labels, a, b) > gap_threshold)
+                if not (overlap or continuum):
                     continue
                 if best is None or r > best[0]:
                     best = (r, a, b)

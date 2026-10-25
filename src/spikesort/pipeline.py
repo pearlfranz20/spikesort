@@ -18,6 +18,7 @@ from .evaluate import isi_violation_rate, isolation_distance, snr
 from .features import apply_features, waveform_features
 from .matching import match_templates, select_templates
 from .preprocess import bandpass, common_median_reference, mad_noise
+from .tracking import track_templates
 
 
 @dataclass
@@ -51,7 +52,18 @@ class SortConfig:
     drift_bin_s: float = 2.0
     drift_max_um: float = 60.0
     drift_kernel_um: float | None = None  # default: nearest-channel spacing
-    drift_passes: int = 2  # re-estimate on corrected data; the centre of mass under-reads motion
+    drift_passes: int = 3  # re-estimate on corrected data; the centre of mass under-reads motion
+    tracking: bool = False  # chunked stage two with templates that follow the units, see tracking.py
+    track_chunk_s: float = 5.0
+    track_alpha: float = 0.5  # how far a template moves towards each chunk's median
+    track_min_spikes: int = 10  # spikes in a chunk needed to update a template
+    track_discovery: bool = True
+    track_discovery_min: int = 100  # unexplained events to pile up before clustering them
+    track_merge_amp_ratio: float = 0.4  # drift can halve a unit's amplitude between its bands
+    track_merge_corr: float = 0.6  # loose shape gate for the merge test; the timing test decides
+    track_ccg_min_expected: float = 10.0  # chance-level close pairs needed to trust the timing test
+    track_min_unit_spikes: int = 20  # units with fewer spikes at the end are dropped
+    track_init_s: float | None = None  # build the initial templates from this much of the start only
     seed: int = 0
 
 
@@ -82,6 +94,7 @@ class Sorting:
     stage1: dict = field(default_factory=dict)  # detection and clustering before matching
     matching: dict = field(default_factory=dict)
     drift: DriftEstimate | None = None  # set when drift correction ran; `filtered` is then corrected
+    tracking: dict = field(default_factory=dict)  # chunk edges and template history when tracking ran
 
     @property
     def n_units(self) -> int:
@@ -147,25 +160,61 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
     stage1["dropped"] = dropped
     by_size = sorted(kept, key=lambda k: -int((labels == k).sum()))
     dictionary = [kept[k] for k in by_size]
-    m = match_templates(x, dictionary, cfg.match_amp_range, cfg.match_threshold,
-                        cfg.match_min_z, cfg.match_max_rounds)
+    tracking_info: dict = {}
+    if cfg.tracking:
+        seeds = [wf_long[labels[ok] == k] for k in by_size]
+        if cfg.track_init_s is not None:
+            # Kilosort 1 style: templates from the start of the recording,
+            # before drift has had time to split anything. Later units are
+            # left to discovery.
+            n_init = int(round(cfg.track_init_s * fs))
+            head = times < n_init
+            t0 = times[head]
+            wf0, _, ok0 = extract_waveforms(x, t0, fs, cfg.pre_ms, cfg.template_post_ms,
+                                            align=cfg.align, return_mask=True)
+            f0, _ = waveform_features(wf0[:, :wf.shape[1]], cfg.n_pcs, per_channel=cfg.per_channel_pca)
+            l0, _ = gmm_cluster(f0, range(1, cfg.k_max + 1), seed=cfg.seed)
+            if cfg.split_dprime is not None:
+                l0 = split_bimodal(wf0, l0, f0, cfg.split_dprime, seed=cfg.seed)
+            l0 = merge_similar(wf0, l0, cfg.merge_corr, cfg.merge_amp_ratio, cfg.merge_dprime)
+            kept0, _ = select_templates(wf0, l0, noise, cfg.min_template_spikes,
+                                        max_outlier_frac=cfg.max_outlier_frac)
+            order0 = sorted(kept0, key=lambda k: -int((l0 == k).sum()))
+            dictionary = [kept0[k] for k in order0]
+            seeds = [wf0[l0 == k] for k in order0]
+        tr = track_templates(x, fs, dictionary, cfg, seed_waveforms=seeds)
+        m_times, m_labels, m_amps, residual = tr.times, tr.labels, tr.amplitudes, tr.residual
+        unit_templates = tr.templates
+        tracking_info = {"chunk_edges": tr.chunk_edges, "history": tr.history,
+                         "discovered": tr.n_discovered, "merged": tr.n_merged, "log": tr.log}
+        rounds = int(tr.chunk_edges.size - 1)
+    else:
+        m = match_templates(x, dictionary, cfg.match_amp_range, cfg.match_threshold,
+                            cfg.match_min_z, cfg.match_max_rounds)
+        m_times, m_labels, m_amps, residual = m.times, m.labels, m.amplitudes, m.residual
+        unit_templates = dict(enumerate(dictionary))
+        rounds = m.rounds
 
-    wf2, times2, ok = extract_waveforms(x, m.times, fs, cfg.pre_ms, cfg.post_ms,
+    wf2, times2, ok = extract_waveforms(x, m_times, fs, cfg.pre_ms, cfg.post_ms,
                                         align="none", return_mask=True)
-    labels2, amps = m.labels[ok], m.amplitudes[ok]
+    labels2, amps = m_labels[ok], m_amps[ok]
     # Renumber the surviving units 0..K-1 by spike count.
     ks, counts = np.unique(labels2, return_counts=True)
     order = ks[np.argsort(-counts, kind="stable")]
     remap = {int(k): i for i, k in enumerate(order)}
     labels2 = np.array([remap[int(k)] for k in labels2], dtype=np.int64)
     n_short = wf2.shape[1] if wf2.size else wf.shape[1]
-    templates2 = {remap[int(k)]: dictionary[int(k)][:n_short] for k in order}
+    templates2 = {remap[int(k)]: unit_templates[int(k)][:n_short] for k in order}
     feats2 = apply_features(wf2, models, cfg.per_channel_pca) if wf2.size else np.empty((0, feats.shape[1]))
+    if tracking_info:
+        tracking_info["history"] = {remap[int(k)]: h for k, h in tracking_info["history"].items()
+                                    if int(k) in remap}
 
-    info = {"rounds": m.rounds, "n_templates": len(dictionary), "n_stage1": int(times.size),
-            "n_matched": int(times2.size)}
+    info = {"rounds": rounds, "n_templates": len(dictionary), "n_stage1": int(times.size),
+            "n_matched": int(times2.size), "mode": "tracking" if cfg.tracking else "matching"}
     return Sorting(times2, labels2, wf2, feats2, templates2, amplitudes=amps,
-                   residual=m.residual.astype(np.float32), matching=info, **common)
+                   residual=residual.astype(np.float32), matching=info, tracking=tracking_info,
+                   **common)
 
 
 def _detect(x: np.ndarray, fs: float, noise: np.ndarray | None, cfg: SortConfig) -> np.ndarray:

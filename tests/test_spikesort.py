@@ -360,3 +360,45 @@ def test_drift_correction_restores_accuracy():
             assert np.sqrt(np.mean((s.drift.displacement_um - true) ** 2)) < 4.0
     assert results[True] > 0.9
     assert results[True] > results[False] + 0.15
+
+
+# Tracking
+
+def test_gap_ratio_separates_continuum_from_two_clusters():
+    from spikesort.cluster import gap_ratio
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((300, 40))
+    b = rng.standard_normal((300, 40))
+    b[:, 0] += 4.0
+    two = np.vstack([a, b])[:, :, None]
+    assert gap_ratio(two, np.repeat([0, 1], 300), 0, 1) < 0.7
+    u = rng.standard_normal((600, 40))
+    u[:, 0] = rng.uniform(0, 8, 600)  # one neuron sliding along a continuum
+    assert gap_ratio(u[:, :, None], (u[:, 0] > 4).astype(int), 0, 1) > 0.75  # noisy; see docstring
+
+
+def test_refractory_overlap_tells_one_neuron_from_two():
+    from spikesort.tracking import refractory_overlap
+
+    rec = simulate_recording(n_units=2, duration=60, rates=(10.0, 12.0), seed=4)
+    t0 = rec.spike_times[rec.spike_labels == 0]
+    t1 = rec.spike_times[rec.spike_labels == 1]
+    close, expected = refractory_overlap(t0[::2], t0[1::2], rec.fs)  # one neuron, split in two
+    assert expected > 5 and close == 0
+    close, expected = refractory_overlap(t0, t1, rec.fs)  # two independent neurons
+    assert expected > 5 and close > 0.4 * expected
+
+
+def test_tracking_matches_plain_matching_on_static_data():
+    rec = simulate_recording(n_units=4, duration=20, seed=3)
+    plain = sort(rec.data, rec.fs)
+    tracked = sort(rec.data, rec.fs, SortConfig(tracking=True))
+    c_plain = compare_to_ground_truth(rec.spike_times, rec.spike_labels, plain.times, plain.labels,
+                                      rec.fs)
+    c_track = compare_to_ground_truth(rec.spike_times, rec.spike_labels, tracked.times, tracked.labels,
+                                      rec.fs)
+    assert tracked.matching["mode"] == "tracking"
+    assert tracked.tracking["chunk_edges"].size == 5  # 20 s in 5 s chunks
+    assert c_track.accuracy.mean() > 0.95
+    assert abs(c_track.accuracy.mean() - c_plain.accuracy.mean()) < 0.03

@@ -41,6 +41,7 @@ class MatchResult:
     shifts: np.ndarray  # fractional shift of the template (samples)
     residual: np.ndarray  # trace after subtracting every fitted template
     rounds: int  # rounds that fitted at least one spike
+    bank: "ShiftBank | None" = None  # the pre-shifted templates used, for exact restoration
 
 
 def select_templates(
@@ -350,7 +351,8 @@ def match_templates(
     fits = [f for f in fits if f is not None]
     if not fits:
         empty = np.empty(0, dtype=np.int64)
-        return MatchResult(empty, empty.copy(), np.empty(0), empty.copy(), np.empty(0), residual, rounds)
+        return MatchResult(empty, empty.copy(), np.empty(0), empty.copy(), np.empty(0), residual, rounds,
+                           shifted)
 
     starts = np.array([f[0] for f in fits], dtype=np.int64)
     labels = np.array([f[1] for f in fits], dtype=np.int64)
@@ -359,4 +361,4 @@ def match_templates(
     times = np.round(starts + shifts + trough[labels]).astype(np.int64)
     order = np.argsort(times, kind="stable")
     return MatchResult(times[order], labels[order], amps[order], starts[order], shifts[order],
-                       residual, rounds)
+                       residual, rounds, shifted)

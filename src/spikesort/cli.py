@@ -38,8 +38,13 @@ def _save(sorting, out: Path, comparison=None):
         dropped = s1.get("dropped", {})
         drop_txt = f", {len(dropped)} dropped as composite" if dropped else ""
         print(f"stage 1: {s1['times'].size} events in {s1['n_clusters']} clusters{drop_txt}")
-        print(f"stage 2: {sorting.matching['rounds']} matching rounds, "
-              f"{sorting.times.size} spikes in {sorting.n_units} units")
+        if sorting.tracking:
+            print(f"stage 2: tracking over {sorting.matching['rounds']} chunks, "
+                  f"{sorting.tracking['merged']} merges, {sorting.tracking['discovered']} discovered, "
+                  f"{sorting.times.size} spikes in {sorting.n_units} units")
+        else:
+            print(f"stage 2: {sorting.matching['rounds']} matching rounds, "
+                  f"{sorting.times.size} spikes in {sorting.n_units} units")
     else:
         print(f"{sorting.times.size} spikes in {sorting.n_units} units")
     print("unit  n_spikes  rate_hz   snr  isi_viol  iso_dist")
@@ -62,6 +67,7 @@ def main(argv=None):
     d.add_argument("--no-split", action="store_true", help="disable the bimodal split pass")
     d.add_argument("--motion", type=float, default=0.0, help="peak probe motion in microns")
     d.add_argument("--drift-correction", action="store_true", help="estimate and undo probe drift")
+    d.add_argument("--tracking", action="store_true", help="experimental: templates follow their units")
     d.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     d.add_argument("--out", type=Path, default=Path("results"))
 
@@ -73,6 +79,7 @@ def main(argv=None):
     s.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     s.add_argument("--positions", type=Path, default=None,
                    help=".npy of channel positions (n_channels, 2) in microns, enables drift correction")
+    s.add_argument("--tracking", action="store_true", help="experimental: templates follow their units")
     s.add_argument("--out", type=Path, default=Path("results"))
 
     args = p.parse_args(argv)
@@ -84,7 +91,8 @@ def main(argv=None):
                                  channel_positions=geom, seed=args.seed, motion_um=args.motion,
                                  unit_margin_um=margin)
         cfg = SortConfig(seed=args.seed, split_dprime=None if args.no_split else 4.0,
-                         template_matching=not args.no_matching, drift_correction=args.drift_correction)
+                         template_matching=not args.no_matching, drift_correction=args.drift_correction,
+                         tracking=args.tracking)
         sorting = sort(rec.data, rec.fs, cfg, channel_positions=geom)
         if sorting.drift is not None:
             from . import plotting
@@ -102,7 +110,7 @@ def main(argv=None):
         positions = np.load(args.positions) if args.positions is not None else None
         cfg = SortConfig(threshold=args.threshold, use_cmr=args.cmr,
                          template_matching=not args.no_matching,
-                         drift_correction=positions is not None)
+                         drift_correction=positions is not None, tracking=args.tracking)
         _save(sort(data, args.fs, cfg, channel_positions=positions), args.out)
 
 
