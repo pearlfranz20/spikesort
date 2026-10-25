@@ -402,3 +402,106 @@ def test_tracking_matches_plain_matching_on_static_data():
     assert tracked.tracking["chunk_edges"].size == 5  # 20 s in 5 s chunks
     assert c_track.accuracy.mean() > 0.95
     assert abs(c_track.accuracy.mean() - c_plain.accuracy.mean()) < 0.03
+
+
+# Drift in position space (localize.py)
+
+def test_geometry_knows_when_height_is_not_identifiable():
+    from spikesort.localize import Geometry
+    from spikesort.simulate import tetrode_geometry
+
+    tet = Geometry.from_positions(tetrode_geometry())
+    assert tet.degenerate and tet.dim == 2
+    lin = Geometry.from_positions(linear_probe_geometry(16))
+    assert not lin.degenerate and lin.dim == 1
+    grid = Geometry.from_positions([[x, y] for x in (0, 20, 40) for y in (0, 20, 40)])
+    assert not grid.degenerate and grid.dim == 2
+
+
+def test_fit_position_recovers_a_source_on_a_probe_and_reproduces_a_tetrode_profile():
+    from spikesort.localize import Geometry, fit_position
+    from spikesort.simulate import tetrode_geometry
+
+    lin = Geometry.from_positions(linear_probe_geometry(16))
+    s_true, z_true, a_true = np.array([37.0]), 24.0, 300.0
+    profile = a_true * lin.gains(s_true, z_true, 1.5)
+    s, z, a, rms = fit_position(profile, lin, 1.5)
+    assert abs(s[0] - s_true[0]) < 0.5 and abs(z - z_true) < 0.5 and abs(a / a_true - 1) < 0.02
+
+    # On a tetrode a source at height 30 is fitted exactly at height 15 as
+    # well: the profile does not say how high the source is.
+    tet = Geometry.from_positions(tetrode_geometry())
+    profile = 200.0 * tet.gains(np.array([10.0, -4.0]), 30.0, 1.5)
+    _, _, _, rms = fit_position(profile, tet, 1.5, z=15.0)
+    assert rms < 0.01
+
+
+def test_select_templates_keeps_a_drifting_unit_when_judged_against_neighbours_in_time():
+    rng = np.random.default_rng(1)
+    t_a, t_b = _two_templates()
+    noise = np.array([4.0, 4.0])
+    scale = np.linspace(0.6, 1.4, 200)  # unit 0 grows over the recording, unit 1 does not
+    drifting = scale[:, None, None] * t_a[None] + 4 * rng.standard_normal((200, *t_a.shape))
+    static = t_b[None] + 4 * rng.standard_normal((100, *t_b.shape))
+    wf = np.vstack([drifting, static])
+    labels = np.repeat([0, 1], [200, 100])
+    times = np.concatenate([np.arange(200) * 1000, np.arange(100) * 2000])
+    kept, dropped = select_templates(wf, labels, noise)
+    assert list(kept) == [1] and dropped == {0: 200}  # against its global median it looks composite
+    kept, dropped = select_templates(wf, labels, noise, times=times)
+    assert sorted(kept) == [0, 1] and dropped == {}
+
+
+def test_link_trajectories_joins_bands_of_one_neuron_and_not_a_neighbour():
+    from spikesort.localize import Geometry, cluster_trajectories, link_trajectories, trough_profiles
+
+    rng = np.random.default_rng(0)
+    geom = Geometry.from_positions(linear_probe_geometry(16))
+    fs, n_bins, bin_s = 30_000.0, 30, 2.0
+    edges = np.arange(n_bins + 1) * int(bin_s * fs)
+    t_s = np.sort(rng.uniform(0, n_bins * bin_s, 1500))
+    times = (t_s * fs).astype(np.int64)
+    motion = 20 * np.sin(2 * np.pi * 1.5 * t_s / (n_bins * bin_s))
+    # Neuron A drifts and was cut into two bands at position zero; neuron B
+    # sits 60 um away and fires throughout.
+    which = rng.integers(0, 2, t_s.size)
+    pos = np.where(which == 0, motion, 60.0 + motion)
+    labels = np.where(which == 1, 2, (pos > 0).astype(int))
+    profiles = np.stack([150.0 * geom.gains(np.array([p]), 20.0, 1.5) for p in pos])
+    profiles += rng.normal(0, 3.0, profiles.shape)
+    traj = cluster_trajectories(times, labels, np.clip(profiles, 0, None), edges, geom)
+    wave = np.zeros((60, 16))
+    wave[20:30, :] = -np.hanning(10)[:, None]  # the same time course on every cluster
+    templates = {k: wave * (profiles[labels == k].mean(axis=0))[None, :] for k in (0, 1, 2)}
+    assert trough_profiles(templates[0][None]).shape == (1, 16)
+    groups = link_trajectories(traj, templates, geom, n_bins)
+    assert sorted(map(sorted, groups)) == [[0, 1], [2]]
+
+
+def test_positions_method_sorts_a_drifting_tetrode():
+    from spikesort.simulate import tetrode_geometry
+
+    geom = tetrode_geometry()
+    rec = simulate_recording(n_units=5, duration=60, seed=0, channel_positions=geom,
+                             motion_um=20, unit_margin_um=15)
+    s = sort(rec.data, rec.fs, SortConfig(drift_correction=True, drift_method="positions"),
+             channel_positions=geom)
+    c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
+    assert s.matching["mode"] == "positions"
+    assert s.drift is None and s.localization["degenerate"]  # no displacement in microns on a tetrode
+    assert c.accuracy.mean() > 0.95 and s.n_units == 5
+    true = -rec.motion_at(s.localization["bin_centres_s"])
+    assert np.corrcoef(s.localization["drift_shape"], true)[0, 1] > 0.6  # but its time course
+
+
+def test_positions_method_estimates_drift_in_microns_on_a_probe():
+    geom = linear_probe_geometry(16)
+    rec = simulate_recording(n_units=5, duration=16, seed=0, channel_positions=geom,
+                             motion_um=20, unit_margin_um=-30)
+    s = sort(rec.data, rec.fs, SortConfig(drift_correction=True, drift_method="positions"),
+             channel_positions=geom)
+    c = compare_to_ground_truth(rec.spike_times, rec.spike_labels, s.times, s.labels, rec.fs)
+    assert c.accuracy.mean() > 0.85
+    true = -rec.motion_at(s.drift.bin_centres_s)
+    true = true - true.mean()
+    assert np.sqrt(np.mean((s.drift.displacement_um - true) ** 2)) < 4.0

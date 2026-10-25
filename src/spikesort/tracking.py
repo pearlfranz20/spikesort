@@ -32,7 +32,7 @@ import numpy as np
 from .cluster import gmm_cluster, merge_similar, separation
 from .detect import detect_spikes, extract_waveforms
 from .features import waveform_features
-from .matching import match_templates, select_templates
+from .matching import match_chunk, select_templates
 from .preprocess import mad_noise
 
 
@@ -48,28 +48,6 @@ class TrackResult:
     n_discovered: int = 0
     n_merged: int = 0
     log: list = field(default_factory=list)  # (chunk, event, details) for debugging
-
-
-def _match_chunk(residual, c0, c1, margin, templates, cfg):
-    """Match residual[c0:c1] in place, with a right margin so spikes that
-    straddle the boundary are fitted whole.
-
-    Fits whose start lies in the margin are restored and left for the
-    next chunk, which will see them with this chunk's spikes already
-    removed.
-    """
-    stop = min(residual.shape[0], c1 + margin)
-    m = match_templates(residual[c0:stop], templates, cfg.match_amp_range,
-                        cfg.match_threshold, cfg.match_min_z, cfg.match_max_rounds)
-    n_t = templates[0].shape[0]
-    keep = m.starts < (c1 - c0)
-    seg = m.residual
-    for s, k, a, sh in zip(m.starts[~keep], m.labels[~keep], m.amplitudes[~keep],
-                           m.shifts[~keep], strict=True):
-        seg[s:s + n_t] += a * m.bank(int(k), float(sh))
-    residual[c0:stop] = seg
-    return (m.starts[keep] + c0, m.labels[keep], m.amplitudes[keep], m.shifts[keep],
-            m.times[keep] + c0, m.bank)
 
 
 def _cleaned(residual, starts, labels, amps, shifts, bank, n_t):
@@ -205,7 +183,7 @@ def track_templates(x: np.ndarray, fs: float, templates: list[np.ndarray], cfg,
     for c in range(n_chunks):
         c0, c1 = int(edges[c]), int(edges[c + 1])
         ids = sorted(temps)
-        starts, lab, amps, shifts, t_fit, bank = _match_chunk(
+        starts, lab, amps, shifts, t_fit, bank = match_chunk(
             residual, c0, c1, margin, [temps[i] for i in ids], cfg)
         unit = np.array([ids[int(j)] for j in lab], dtype=np.int64)
         cleaned = _cleaned(residual, starts, lab, amps, shifts, bank, n_t)
@@ -283,7 +261,7 @@ def track_templates(x: np.ndarray, fs: float, templates: list[np.ndarray], cfg,
             at = c if c in h else next((k for k in cs if k > c), cs[-1])
             ids_c.append(i)
             temps_c.append(h[at])
-        starts, lab, amps, _, times, _ = _match_chunk(residual, c0, c1, margin, temps_c, cfg)
+        starts, lab, amps, _, times, _ = match_chunk(residual, c0, c1, margin, temps_c, cfg)
         all_times.append(times)
         all_labels.append(np.array([resolve(ids_c[int(j)]) for j in lab], dtype=np.int64))
         all_amps.append(amps)

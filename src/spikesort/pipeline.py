@@ -16,7 +16,17 @@ from .detect import detect_spikes, detect_spikes_combined, extract_waveforms
 from .drift import DriftEstimate, estimate_drift, shift_channels, spike_depths
 from .evaluate import isi_violation_rate, isolation_distance, snr
 from .features import apply_features, waveform_features
-from .matching import match_templates, select_templates
+from .localize import (
+    Geometry,
+    build_unit,
+    cluster_trajectories,
+    drift_shape,
+    link_trajectories,
+    render_template,
+    rigid_registration,
+    trough_profiles,
+)
+from .matching import match_in_chunks, match_templates, select_templates
 from .preprocess import bandpass, common_median_reference, mad_noise
 from .tracking import track_templates
 
@@ -47,12 +57,19 @@ class SortConfig:
     template_post_ms: float = 2.0  # stage-two templates run longer, to cover the rebound
     min_template_spikes: int = 10
     max_outlier_frac: float = 0.5
-    drift_correction: bool = False  # needs channel_positions, see drift.py
+    drift_correction: bool = False  # needs channel_positions, see drift.py and localize.py
+    drift_method: str = "interpolate"  # "interpolate" (re-sample channels) or "positions" (localize.py)
     drift_axis: tuple[float, float] = (0.0, 1.0)
     drift_bin_s: float = 2.0
     drift_max_um: float = 60.0
     drift_kernel_um: float | None = None  # default: nearest-channel spacing
     drift_passes: int = 3  # re-estimate on corrected data; the centre of mass under-reads motion
+    drift_falloff: float = 1.5  # point-source amplitude falls off as distance^-falloff ("positions")
+    drift_fixed_z_um: float = 15.0  # source height assumed on a degenerate geometry such as a tetrode
+    link_max_profile_dist: float = 0.4  # relative profile mismatch where two trajectories meet
+    link_min_shape_corr: float = 0.97  # waveform time course agreement on the loudest channel
+    link_max_gap_bins: int = 2  # trajectories further apart in time than this never meet
+    link_max_coactivity: float = 0.3  # bands of one neuron do not fire in the same bins
     tracking: bool = False  # chunked stage two with templates that follow the units, see tracking.py
     track_chunk_s: float = 5.0
     track_alpha: float = 0.5  # how far a template moves towards each chunk's median
@@ -93,8 +110,9 @@ class Sorting:
     residual: np.ndarray | None = None  # filtered minus every fitted template
     stage1: dict = field(default_factory=dict)  # detection and clustering before matching
     matching: dict = field(default_factory=dict)
-    drift: DriftEstimate | None = None  # set when drift correction ran; `filtered` is then corrected
+    drift: DriftEstimate | None = None  # set when drift correction ran ("interpolate" also corrects filtered)
     tracking: dict = field(default_factory=dict)  # chunk edges and template history when tracking ran
+    localization: dict = field(default_factory=dict)  # units, trajectories and rigid fit ("positions" method)
 
     @property
     def n_units(self) -> int:
@@ -133,7 +151,10 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
     if cfg.drift_correction:
         if channel_positions is None:
             raise ValueError("drift correction needs channel_positions")
-        x, drift = correct_drift(x, fs, np.asarray(channel_positions, dtype=float), cfg)
+        if cfg.drift_method == "interpolate":
+            x, drift = correct_drift(x, fs, np.asarray(channel_positions, dtype=float), cfg)
+        elif cfg.drift_method != "positions":
+            raise ValueError(f"unknown drift_method {cfg.drift_method!r}")
     noise = mad_noise(x)
 
     times = _detect(x, fs, noise, cfg)
@@ -155,13 +176,23 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
     # Longer waveforms for the templates, so the whole spike is subtracted.
     wf_long, _, ok = extract_waveforms(x, times, fs, cfg.pre_ms, cfg.template_post_ms,
                                        align=cfg.align, return_mask=True)
+    positions_method = cfg.drift_correction and cfg.drift_method == "positions"
+    # With drift, judge each spike against its neighbours in time, so a
+    # drifting unit is not mistaken for a collision cluster (select_templates).
     kept, dropped = select_templates(wf_long, labels[ok], noise, cfg.min_template_spikes,
-                                     max_outlier_frac=cfg.max_outlier_frac)
+                                     max_outlier_frac=cfg.max_outlier_frac,
+                                     times=times[ok] if positions_method else None)
     stage1["dropped"] = dropped
+    stage1["kept_templates"] = kept
     by_size = sorted(kept, key=lambda k: -int((labels == k).sum()))
     dictionary = [kept[k] for k in by_size]
     tracking_info: dict = {}
-    if cfg.tracking:
+    localization_info: dict = {}
+    if positions_method:
+        m_times, m_labels, m_amps, residual, unit_templates, drift, localization_info = positions_stage_two(
+            x, fs, times[ok], labels[ok], wf_long, kept, np.asarray(channel_positions, dtype=float), cfg)
+        rounds = int(localization_info["n_bins"])
+    elif cfg.tracking:
         seeds = [wf_long[labels[ok] == k] for k in by_size]
         if cfg.track_init_s is not None:
             # Kilosort 1 style: templates from the start of the recording,
@@ -212,9 +243,14 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
 
     info = {"rounds": rounds, "n_templates": len(dictionary), "n_stage1": int(times.size),
             "n_matched": int(times2.size), "mode": "tracking" if cfg.tracking else "matching"}
+    if localization_info:
+        info["mode"] = "positions"
+        common["drift"] = drift
+        # Final unit id of every linked unit (units with no spikes left have none).
+        localization_info["final_ids"] = {i: remap.get(i) for i in range(len(localization_info["units"]))}
     return Sorting(times2, labels2, wf2, feats2, templates2, amplitudes=amps,
                    residual=residual.astype(np.float32), matching=info, tracking=tracking_info,
-                   **common)
+                   localization=localization_info, **common)
 
 
 def _detect(x: np.ndarray, fs: float, noise: np.ndarray | None, cfg: SortConfig) -> np.ndarray:
@@ -251,3 +287,53 @@ def correct_drift(x: np.ndarray, fs: float, channel_positions: np.ndarray,
             est.displacement_um = est.displacement_um + this.displacement_um
         corrected = shift_channels(x, channel_positions, total, axis, cfg.drift_kernel_um)
     return corrected, est
+
+
+def positions_stage_two(x, fs, times, labels, wf_long, kept, channel_positions, cfg):
+    """Stage two for the "positions" drift method. See localize.py.
+
+    Fits every kept cluster's trajectory, links clusters whose trajectories
+    meet into units, renders each unit's template for every bin along its
+    own trajectory, and matches bin by bin.
+    """
+    geom = Geometry.from_positions(channel_positions)
+    n = x.shape[0]
+    chunk = max(1, int(round(cfg.drift_bin_s * fs)))
+    edges = np.append(np.arange(0, n, chunk), n)
+    n_bins = edges.size - 1
+    centres = 0.5 * (edges[:-1] + edges[1:]) / fs
+
+    mask = np.isin(labels, list(kept))
+    profiles = trough_profiles(wf_long[mask])
+    traj = cluster_trajectories(times[mask], labels[mask], profiles, edges, geom, cfg.drift_falloff,
+                                cfg.drift_fixed_z_um)
+    rigid = rigid_registration(traj, n_bins, geom.dim)
+    frame = None if geom.degenerate else rigid.displacement
+    groups = link_trajectories(traj, kept, geom, n_bins, cfg.link_max_profile_dist, cfg.link_min_shape_corr,
+                               cfg.link_max_gap_bins, cfg.link_max_coactivity, cfg.drift_falloff, frame)
+    units = [build_unit(g, traj, kept, n_bins, geom, None if geom.degenerate else rigid, cfg.drift_falloff)
+             for g in groups]
+    templates_per_bin = [[render_template(u.reference, u.reference_position, u.positions[b], u.z, geom,
+                                          cfg.drift_falloff, u.reference_amplitude, u.amplitudes[b])
+                          for u in units] for b in range(n_bins)]
+    ids = [list(range(len(units)))] * n_bins
+    m_times, m_units, m_amps, residual = match_in_chunks(x, edges, templates_per_bin, ids, cfg)
+
+    axis = np.asarray(cfg.drift_axis, dtype=float)
+    axis /= np.linalg.norm(axis)
+    wf_short = wf_long[mask][:, :int(round((cfg.pre_ms + cfg.post_ms) * 1e-3 * fs))]
+    depths, amps = spike_depths(wf_short, channel_positions, axis)
+    which = np.clip(np.searchsorted(edges, times[mask], "right") - 1, 0, n_bins - 1)
+    shape = drift_shape(units, geom, axis)
+    drift = None
+    if not geom.degenerate:
+        # The rigid fit is a real displacement in microns only where the
+        # fitted positions share a frame (module docstring of localize.py).
+        along = rigid.displacement @ (geom.basis.T @ axis)
+        drift = DriftEstimate(centres, along, np.bincount(which, minlength=n_bins),
+                              depths=depths, amplitudes=amps, times_s=times[mask] / fs)
+    unit_templates = {i: u.reference for i, u in enumerate(units)}
+    info = {"n_bins": n_bins, "groups": groups, "trajectories": traj, "rigid_residual_um": rigid.residual_um,
+            "degenerate": geom.degenerate, "units": units, "edges": edges, "bin_centres_s": centres,
+            "drift_shape": shape, "templates_per_bin": templates_per_bin}
+    return m_times, m_units, m_amps, residual, unit_templates, drift, info

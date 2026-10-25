@@ -51,6 +51,7 @@ def select_templates(
     min_spikes: int = 10,
     outlier_ratio: float = 1.5,
     max_outlier_frac: float = 0.5,
+    times: np.ndarray | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[int, int]]:
     """Decide which stage-one clusters are real units worth a template.
 
@@ -63,6 +64,13 @@ def select_templates(
     more than `max_outlier_frac` of its members are outliers, or if it has
     fewer than `min_spikes` spikes.
 
+    With `times` (a sample time per waveform) each member is compared
+    with the median of the `min_spikes` members nearest to it in time
+    instead. A drifting neuron's waveforms change over the recording,
+    which would otherwise read as outliers, but over a few neighbouring
+    spikes a real unit is still one waveform and a collision cluster is
+    not.
+
     Returns (kept, dropped): kept maps cluster id to its template, dropped
     maps cluster id to its spike count. Falls back to keeping everything if
     the test would drop every cluster.
@@ -71,12 +79,20 @@ def select_templates(
     kept: dict[int, np.ndarray] = {}
     dropped: dict[int, int] = {}
     for k in np.unique(labels):
-        w = waveforms[labels == k].astype(np.float64)
+        m = labels == k
+        w = waveforms[m].astype(np.float64)
         if w.shape[0] < min_spikes:
             dropped[int(k)] = int(w.shape[0])
             continue
         tmpl = np.median(w, axis=0)
-        resid = ((w - tmpl) ** 2).sum(axis=(1, 2))
+        ref = np.broadcast_to(tmpl, w.shape)
+        if times is not None and w.shape[0] > min_spikes:
+            order = np.argsort(times[m], kind="stable")
+            ref = np.empty_like(w)
+            for rank, i in enumerate(order):
+                lo = min(max(rank - min_spikes // 2, 0), w.shape[0] - min_spikes)
+                ref[i] = np.median(w[order[lo:lo + min_spikes]], axis=0)
+        resid = ((w - ref) ** 2).sum(axis=(1, 2))
         if (resid > outlier_ratio * floor).mean() > max_outlier_frac:
             dropped[int(k)] = int(w.shape[0])
             continue
@@ -362,3 +378,56 @@ def match_templates(
     order = np.argsort(times, kind="stable")
     return MatchResult(times[order], labels[order], amps[order], starts[order], shifts[order],
                        residual, rounds, shifted)
+
+
+def match_chunk(residual: np.ndarray, c0: int, c1: int, margin: int, templates: list[np.ndarray], cfg):
+    """Match residual[c0:c1] in place, with a right margin so spikes that
+    straddle the boundary are fitted whole.
+
+    Fits whose start lies in the margin are restored and left for the
+    next chunk, which will see them with this chunk's spikes already
+    removed. Returns (starts, labels, amplitudes, shifts, times, bank) with
+    absolute sample indices; labels index `templates`.
+    """
+    stop = min(residual.shape[0], c1 + margin)
+    m = match_templates(residual[c0:stop], templates, cfg.match_amp_range,
+                        cfg.match_threshold, cfg.match_min_z, cfg.match_max_rounds)
+    n_t = templates[0].shape[0]
+    keep = m.starts < (c1 - c0)
+    seg = m.residual
+    for s, k, a, sh in zip(m.starts[~keep], m.labels[~keep], m.amplitudes[~keep],
+                           m.shifts[~keep], strict=True):
+        seg[s:s + n_t] += a * m.bank(int(k), float(sh))
+    residual[c0:stop] = seg
+    return (m.starts[keep] + c0, m.labels[keep], m.amplitudes[keep], m.shifts[keep],
+            m.times[keep] + c0, m.bank)
+
+
+def match_in_chunks(x: np.ndarray, edges: np.ndarray, templates_per_chunk: list[list[np.ndarray]],
+                    ids_per_chunk: list[list[int]], cfg):
+    """Match every chunk with its own template list.
+
+    `templates_per_chunk[c]` are the templates to use between
+    edges[c] and edges[c + 1], and `ids_per_chunk[c]` the unit id of each.
+    Returns (times, unit ids, amplitudes, residual), times sorted.
+    """
+    residual = np.array(x, dtype=np.float32, copy=True)
+    all_t, all_u, all_a = [], [], []
+    for c in range(edges.size - 1):
+        temps = templates_per_chunk[c]
+        if not temps:
+            continue
+        n_t = temps[0].shape[0]
+        _, lab, amps, _, times, _ = match_chunk(residual, int(edges[c]), int(edges[c + 1]), 2 * n_t,
+                                                temps, cfg)
+        all_t.append(times)
+        all_u.append(np.array([ids_per_chunk[c][int(j)] for j in lab], dtype=np.int64))
+        all_a.append(amps)
+    if not all_t:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty.copy(), np.empty(0), residual
+    times = np.concatenate(all_t)
+    units = np.concatenate(all_u)
+    amps = np.concatenate(all_a)
+    order = np.argsort(times, kind="stable")
+    return times[order], units[order], amps[order], residual

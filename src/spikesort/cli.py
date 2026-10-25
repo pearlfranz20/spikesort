@@ -42,6 +42,11 @@ def _save(sorting, out: Path, comparison=None):
             print(f"stage 2: tracking over {sorting.matching['rounds']} chunks, "
                   f"{sorting.tracking['merged']} merges, {sorting.tracking['discovered']} discovered, "
                   f"{sorting.times.size} spikes in {sorting.n_units} units")
+        elif sorting.localization:
+            loc = sorting.localization
+            n_linked = sum(len(g) for g in loc["groups"])
+            print(f"stage 2: {n_linked} clusters linked into {len(loc['groups'])} units over "
+                  f"{loc['n_bins']} bins, {sorting.times.size} spikes in {sorting.n_units} units")
         else:
             print(f"stage 2: {sorting.matching['rounds']} matching rounds, "
                   f"{sorting.times.size} spikes in {sorting.n_units} units")
@@ -67,6 +72,8 @@ def main(argv=None):
     d.add_argument("--no-split", action="store_true", help="disable the bimodal split pass")
     d.add_argument("--motion", type=float, default=0.0, help="peak probe motion in microns")
     d.add_argument("--drift-correction", action="store_true", help="estimate and undo probe drift")
+    d.add_argument("--drift-method", choices=["interpolate", "positions"], default="interpolate",
+                   help="re-sample channels (interpolate) or follow each unit in position space (positions)")
     d.add_argument("--tracking", action="store_true", help="experimental: templates follow their units")
     d.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     d.add_argument("--out", type=Path, default=Path("results"))
@@ -79,6 +86,8 @@ def main(argv=None):
     s.add_argument("--no-matching", action="store_true", help="stop after clustering (stage 1)")
     s.add_argument("--positions", type=Path, default=None,
                    help=".npy of channel positions (n_channels, 2) in microns, enables drift correction")
+    s.add_argument("--drift-method", choices=["interpolate", "positions"], default="interpolate",
+                   help="re-sample channels (interpolate) or follow each unit in position space (positions)")
     s.add_argument("--tracking", action="store_true", help="experimental: templates follow their units")
     s.add_argument("--out", type=Path, default=Path("results"))
 
@@ -92,14 +101,18 @@ def main(argv=None):
                                  unit_margin_um=margin)
         cfg = SortConfig(seed=args.seed, split_dprime=None if args.no_split else 4.0,
                          template_matching=not args.no_matching, drift_correction=args.drift_correction,
-                         tracking=args.tracking)
+                         drift_method=args.drift_method, tracking=args.tracking)
         sorting = sort(rec.data, rec.fs, cfg, channel_positions=geom)
-        if sorting.drift is not None:
+        if sorting.drift is not None or sorting.localization:
             from . import plotting
 
             args.out.mkdir(parents=True, exist_ok=True)
-            fig = plotting.plot_drift(sorting, true_displacement=lambda t: -rec.motion_at(t))
-            fig.savefig(args.out / "drift_map.png", dpi=150)
+            if sorting.drift is not None:
+                fig = plotting.plot_drift(sorting, true_displacement=lambda t: -rec.motion_at(t))
+                fig.savefig(args.out / "drift_map.png", dpi=150)
+            if sorting.localization:
+                fig = plotting.plot_trajectories(sorting, true_displacement=lambda t: -rec.motion_at(t))
+                fig.savefig(args.out / "trajectories.png", dpi=150)
         comp = compare_to_ground_truth(rec.spike_times, rec.spike_labels,
                                        sorting.times, sorting.labels, rec.fs)
         _save(sorting, args.out, comp)
@@ -110,8 +123,15 @@ def main(argv=None):
         positions = np.load(args.positions) if args.positions is not None else None
         cfg = SortConfig(threshold=args.threshold, use_cmr=args.cmr,
                          template_matching=not args.no_matching,
-                         drift_correction=positions is not None, tracking=args.tracking)
-        _save(sort(data, args.fs, cfg, channel_positions=positions), args.out)
+                         drift_correction=positions is not None, drift_method=args.drift_method,
+                         tracking=args.tracking)
+        sorting = sort(data, args.fs, cfg, channel_positions=positions)
+        if sorting.localization:
+            from . import plotting
+
+            args.out.mkdir(parents=True, exist_ok=True)
+            plotting.plot_trajectories(sorting).savefig(args.out / "trajectories.png", dpi=150)
+        _save(sorting, args.out)
 
 
 if __name__ == "__main__":

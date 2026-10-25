@@ -138,6 +138,7 @@ def main():
     p.add_argument("--max-channels", type=int, default=None, help="use only the first N channels")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--drift-correction", action="store_true")
+    p.add_argument("--drift-method", choices=["interpolate", "positions"], default="interpolate")
     p.add_argument("--tracking", action="store_true")
     p.add_argument("--out", type=Path, default=Path("results/real_data"))
     args = p.parse_args()
@@ -150,16 +151,19 @@ def main():
     if args.generate_drift:
         static, drifting, gt = generate_drifting(args)
         results = {}
-        for name, rec, corrected in [("static", static, False), ("drifting", drifting, False),
-                                     ("drifting, corrected", drifting, True)]:
+        runs = [("static", static, SortConfig()), ("drifting", drifting, SortConfig()),
+                ("drifting, interpolation", drifting, SortConfig(drift_correction=True)),
+                ("drifting, positions", drifting,
+                 SortConfig(drift_correction=True, drift_method="positions"))]
+        for name, rec, cfg in runs:
             x, fs, start, positions = traces_in_uv(rec, 0.0, None, None)
-            s = sort(x, fs, SortConfig(drift_correction=corrected), channel_positions=positions)
+            s = sort(x, fs, cfg, channel_positions=positions)
             gt_times, gt_labels = ground_truth_arrays(gt, start, x.shape[0])
             comp = compare_to_ground_truth(gt_times, gt_labels, s.times, s.labels, fs)
             results[name] = {"accuracy": float(comp.accuracy.mean()),
                              "precision": float(comp.precision.mean()),
                              "recall": float(comp.recall.mean()), "n_units_found": int(s.n_units)}
-            line = (f"{name:<20} accuracy {comp.accuracy.mean():.3f} precision {comp.precision.mean():.3f} "
+            line = (f"{name:<24} accuracy {comp.accuracy.mean():.3f} precision {comp.precision.mean():.3f} "
                     f"units {s.n_units}/{len(gt.unit_ids)}")
             if s.drift is not None:
                 est = s.drift.displacement_um
@@ -175,7 +179,8 @@ def main():
     print(f"{x.shape[1]} channels, {x.shape[0] / fs:.1f} s at {fs:.0f} Hz, "
           f"{'with' if gt is not None else 'without'} ground truth")
 
-    cfg = SortConfig(drift_correction=args.drift_correction, tracking=args.tracking)
+    cfg = SortConfig(drift_correction=args.drift_correction, drift_method=args.drift_method,
+                     tracking=args.tracking)
     s = sort(x, fs, cfg, channel_positions=positions)
     print(f"stage 1: {s.stage1['times'].size} events in {s.stage1['n_clusters']} clusters; "
           f"stage 2: {s.times.size} spikes in {s.n_units} units")

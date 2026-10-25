@@ -217,3 +217,63 @@ def plot_drift(s: Sorting, true_displacement=None, fig=None, max_points: int = 2
         _style(ax)
     axes[0].set_ylabel("depth along probe (um)", fontsize=9)
     return fig
+
+
+def plot_trajectories(s: Sorting, true_displacement=None, fig=None):
+    """Stage-one clusters as amplitude trajectories, coloured by the unit they were linked into.
+
+    Left: every kept stage-one cluster's loudest-channel amplitude in each
+    time bin it fired in, one line per cluster, coloured by the final unit
+    its group became (grey if the group kept no spikes). A drifting neuron
+    shows up as a chain of bands in one colour, each band active in its
+    own epoch. Right: the drift time course the trajectories imply, with
+    the true displacement if given. On a tetrode this is a shape in
+    arbitrary units (see localize.drift_shape), on a probe a displacement
+    in microns.
+    """
+    loc = s.localization
+    if not loc:
+        raise ValueError("this sorting did not use the positions drift method")
+    traj, centres = loc["trajectories"], loc["bin_centres_s"]
+    unit_of = {k: i for i, g in enumerate(loc["groups"]) for k in g}
+    final = loc.get("final_ids", {})
+
+    fig = fig or plt.figure(figsize=(11, 3.8), constrained_layout=True)
+    axes = fig.subplots(1, 2)
+    seen = set()
+    for k in sorted(traj):
+        t = traj[k]
+        if t.bins.size == 0:
+            continue
+        unit = final.get(unit_of.get(k))
+        color = "#b0b4ba" if unit is None else _color(unit)
+        label = None
+        if unit is not None and unit not in seen:
+            seen.add(unit)
+            label = f"unit {unit}"
+        axes[0].plot(centres[t.bins], t.amplitudes, "o-", color=color, ms=2.5, lw=1.0, label=label)
+    axes[0].set_xlabel("time (s)", fontsize=9)
+    axes[0].set_ylabel("amplitude at loudest channel (uV)", fontsize=9)
+    axes[0].set_title("Stage-one clusters, linked into units by colour", fontsize=10, loc="left")
+    axes[0].legend(fontsize=7, frameon=False, ncol=2)
+
+    if s.drift is not None:
+        est, ylabel = s.drift.displacement_um, "displacement (um)"
+    else:
+        est, ylabel = loc["drift_shape"], "drift (arbitrary units)"
+    axes[1].plot(centres, est, color="#2a6fdb", lw=1.6, label="estimated")
+    if true_displacement is not None:
+        true = np.asarray(true_displacement(centres), dtype=float)
+        true = true - true.mean()
+        if s.drift is None and true.std() > 0:
+            true = true / true.std() * max(est.std(), 1e-9)
+        axes[1].plot(centres, true, color="#e0782b", lw=1.2, ls="--",
+                     label="true" if s.drift is not None else "true (rescaled)")
+    axes[1].legend(fontsize=8, frameon=False)
+    axes[1].set_xlabel("time (s)", fontsize=9)
+    axes[1].set_ylabel(ylabel, fontsize=9)
+    title = "Drift time course" if s.drift is not None else "Drift time course (shape only on a tetrode)"
+    axes[1].set_title(title, fontsize=10, loc="left")
+    for ax in axes:
+        _style(ax)
+    return fig

@@ -3,12 +3,14 @@
 Two probes. A tetrode with 5 units, and a 16-channel linear probe (20 um
 pitch) with 8 units placed inside the array, away from its ends. Motion is
 a slow sinusoid along the probe axis (one and a half cycles over the
-recording) at increasing amplitude. "Corrected" estimates the drift from
-spike depths and re-interpolates the channels before sorting (drift.py).
-"Tracked" is the experimental template-tracking stage two (tracking.py),
-run on the tetrode, where there is nothing to interpolate along: once with
-templates from the whole recording and once with templates from the first
-10 s only.
+recording) at increasing amplitude. "Interpolation" estimates the drift
+from spike depths and re-interpolates the channels before sorting
+(drift.py). "Tracking" is the experimental template-tracking stage two
+(tracking.py), run on the tetrode, where there is nothing to interpolate
+along. "Positions" localizes every cluster in every time bin, links the
+bands of a drifting neuron by continuity and matches each bin with
+templates rendered along the unit's own trajectory (localize.py); it works
+on both probes.
 
     python benchmarks/drift.py --out benchmarks/results
     python benchmarks/drift.py --plot-only
@@ -34,25 +36,27 @@ from spikesort import (
     sort,
     tetrode_geometry,
 )
-from spikesort.plotting import plot_drift
+from spikesort.plotting import plot_drift, plot_trajectories
 
 PROBES = {
     "tetrode": dict(geometry=tetrode_geometry(), n_units=5, margin=15.0),
     "linear16": dict(geometry=linear_probe_geometry(16), n_units=8, margin=-30.0),
 }
 MOTIONS = [0, 10, 20, 30, 40]
+POSITIONS = SortConfig(drift_correction=True, drift_method="positions")
 MODES = {
     "tetrode": [("plain", SortConfig()), ("corrected", SortConfig(drift_correction=True)),
-                ("tracked", SortConfig(tracking=True)),
-                ("tracked_init10", SortConfig(tracking=True, track_init_s=10.0))],
-    "linear16": [("plain", SortConfig()), ("corrected", SortConfig(drift_correction=True))],
+                ("tracked", SortConfig(tracking=True)), ("positions", POSITIONS)],
+    "linear16": [("plain", SortConfig()), ("corrected", SortConfig(drift_correction=True)),
+                 ("positions", POSITIONS)],
 }
 STYLE = {("tetrode", "plain"): ("#8a8f98", "--", "tetrode, uncorrected"),
-         ("tetrode", "corrected"): ("#8a8f98", "-", "tetrode, interpolation"),
-         ("tetrode", "tracked"): ("#c4405a", ":", "tetrode, tracking"),
-         ("tetrode", "tracked_init10"): ("#c4405a", "-.", "tetrode, tracking from first 10 s"),
+         ("tetrode", "corrected"): ("#8a8f98", ":", "tetrode, interpolation"),
+         ("tetrode", "tracked"): ("#c4405a", "-.", "tetrode, tracking"),
+         ("tetrode", "positions"): ("#c4405a", "-", "tetrode, positions"),
          ("linear16", "plain"): ("#2a6fdb", "--", "16-ch linear, uncorrected"),
-         ("linear16", "corrected"): ("#2a6fdb", "-", "16-ch linear, interpolation")}
+         ("linear16", "corrected"): ("#2a6fdb", ":", "16-ch linear, interpolation"),
+         ("linear16", "positions"): ("#2a6fdb", "-", "16-ch linear, positions")}
 
 
 def run_one(probe: str, motion: float, seed: int, duration: float) -> list[dict]:
@@ -71,6 +75,12 @@ def run_one(probe: str, motion: float, seed: int, duration: float) -> list[dict]
             true = -rec.motion_at(s.drift.bin_centres_s)
             true = true - true.mean()
             row["drift_rms_error_um"] = float(np.sqrt(np.mean((s.drift.displacement_um - true) ** 2)))
+        elif s.localization:
+            # A tetrode gives the drift's time course but not its size.
+            true = -rec.motion_at(s.localization["bin_centres_s"])
+            shape = s.localization["drift_shape"]
+            if true.std() > 0 and shape.std() > 0:
+                row["drift_shape_corr"] = float(np.corrcoef(shape, true)[0, 1])
         rows.append(row)
     return rows
 
@@ -84,6 +94,15 @@ def example_figure(out: Path, duration: float):
     fig = plot_drift(s, true_displacement=lambda t: -rec.motion_at(t))
     fig.savefig(out / "drift_map.png", dpi=150)
     print(f"saved {out}/drift_map.png")
+
+    spec = PROBES["tetrode"]
+    rec = simulate_recording(n_units=spec["n_units"], duration=duration, seed=0,
+                             channel_positions=spec["geometry"], motion_um=20,
+                             unit_margin_um=spec["margin"])
+    s = sort(rec.data, rec.fs, POSITIONS, channel_positions=spec["geometry"])
+    fig = plot_trajectories(s, true_displacement=lambda t: -rec.motion_at(t))
+    fig.savefig(out / "trajectories.png", dpi=150)
+    print(f"saved {out}/trajectories.png")
 
 
 def main():
@@ -135,20 +154,27 @@ def plot(rows, out: Path):
 
 
 def table(rows):
-    cols = [("tetrode", "plain"), ("tetrode", "corrected"), ("tetrode", "tracked"),
-            ("tetrode", "tracked_init10"), ("linear16", "plain"), ("linear16", "corrected")]
-    print("\n| Peak motion (um) | Tetrode | Tetrode, interpolation | Tetrode, tracking "
-          "| Tetrode, tracking from first 10 s | Linear 16-ch | Linear, interpolation "
-          "| Drift estimate error (um) |")
+    cols = [("tetrode", "plain"), ("tetrode", "corrected"), ("tetrode", "tracked"), ("tetrode", "positions"),
+            ("linear16", "plain"), ("linear16", "corrected"), ("linear16", "positions")]
+    print("\n| Peak motion (um) | Tetrode | Tetrode, interpolation | Tetrode, tracking | Tetrode, positions "
+          "| Linear 16-ch | Linear, interpolation | Linear, positions |")
     print("|---|---|---|---|---|---|---|---|")
     for mo in MOTIONS:
         cells = [f"{_mean(rows, p, m, mo, 'accuracy'):.2f}" for p, m in cols]
-        err = _mean(rows, "linear16", "corrected", mo, "drift_rms_error_um")
-        print(f"| {mo} | {' | '.join(cells)} | {err:.1f} |")
+        print(f"| {mo} | {' | '.join(cells)} |")
     print("\nprecision:")
     for mo in MOTIONS:
         cells = [f"{_mean(rows, p, m, mo, 'precision'):.2f}" for p, m in cols]
         print(f"| {mo} | {' | '.join(cells)} |")
+    print("\ndrift estimate: linear probe RMS error (um), tetrode correlation of the shape with the truth")
+    print("| Peak motion (um) | Linear, interpolation (um) | Linear, positions (um) "
+          "| Tetrode, positions (corr) |")
+    print("|---|---|---|---|")
+    for mo in MOTIONS:
+        e1 = _mean(rows, "linear16", "corrected", mo, "drift_rms_error_um")
+        e2 = _mean(rows, "linear16", "positions", mo, "drift_rms_error_um")
+        c = _mean(rows, "tetrode", "positions", mo, "drift_shape_corr")
+        print(f"| {mo} | {e1:.1f} | {e2:.1f} | {c:.2f} |")
 
 
 if __name__ == "__main__":
