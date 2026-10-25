@@ -13,6 +13,8 @@ raw voltage
   -> bandpass 300-6000 Hz (zero-phase Butterworth)
   -> drift correction (optional, linear arrays): estimate motion from spike
      depths, re-interpolate channels so every neuron stays put
+     (or, any geometry: localize every cluster over time, link the pieces
+     of each drifting neuron and match with templates that follow it)
   stage one
   -> detect: union of a 5 sigma threshold (1 ms dead time) and a smoothed
              multichannel energy score (2 ms dead time)
@@ -37,6 +39,7 @@ raw voltage
 | `cluster.py` | GMM with BIC, split and merge passes, cluster separation (d'). |
 | `matching.py` | Template selection, FFT matched filtering, greedy matching pursuit with refinement. |
 | `drift.py` | Spike depths, pairwise histogram registration with least-squares reconciliation, kriging channel shift. |
+| `localize.py` | Point-source localization of clusters per time bin, linking of a drifting neuron's pieces by continuity, templates rendered along each unit's trajectory, rigid drift registration. Works on a tetrode, where the channel shift does not. |
 | `tracking.py` | Experimental: chunked matching with templates that follow their units, merging and discovery. |
 | `evaluate.py` | SpikeForest-style accuracy, Hungarian matching, ISI violations, SNR, isolation distance (Harris et al. 2001), collision analysis. |
 
@@ -47,8 +50,10 @@ pip install -e ".[dev]"
 spikesort demo --units 5 --duration 60 --seed 0 --out results/
 spikesort demo --no-matching ...                                # stage one only
 spikesort demo --probe linear --units 8 --motion 20 --drift-correction ...
+spikesort demo --motion 20 --drift-correction --drift-method positions ...   # tetrode drift
 spikesort sort my_recording.npy --fs 30000 --out results/       # (n_samples, n_channels) array
 spikesort sort my_recording.npy --fs 30000 --positions chans.npy  # (n_channels, 2) um, enables drift correction
+spikesort sort my_recording.npy --fs 30000 --positions chans.npy --drift-method positions
 pytest
 ```
 
@@ -172,19 +177,19 @@ Noise 25 uV goes from 0.82 to 0.98 and noise 30 uV from 0.79 to 0.95, both equal
 
 ![Drift map: spike depths over time, raw and corrected](docs/img/drift_map.png)
 
-Real probes move relative to the tissue by tens of microns over a recording. The simulator now moves the electrodes along a slow sinusoid (one and a half cycles per recording) so each spike's per-channel amplitudes depend on when it fired. Nothing in the sorter assumed that, and it shows: on a 16-channel linear probe with 20 um of motion, stage one splits every unit into several clusters that are active at different times, and accuracy falls from 1.00 to 0.61, and to 0.39 at 40 um.
+Real probes move relative to the tissue by tens of microns over a recording. The simulator now moves the electrodes along a slow sinusoid (one and a half cycles per recording) so each spike's per-channel amplitudes depend on when it fired. Nothing in the sorter assumed that, and it shows: on a 16-channel linear probe with 20 um of motion, stage one splits every unit into several clusters that are active at different times, and accuracy falls from 1.00 to 0.57, and to 0.38 at 40 um.
 
 The correction follows Kilosort 2.5. Every detected spike gets a depth, the centre of mass of its squared per-channel trough amplitudes along the shank. The recording is cut into 2 s bins, each bin becomes an amplitude-weighted depth histogram, every pair of bins is registered by cross-correlation, and the pairwise shifts are reconciled into one trajectory by weighted least squares. The filtered data is then re-sampled along the shank at each sample's displacement with a Gaussian-kernel interpolant, and the ordinary pipeline runs on the result. Three passes, because the centre of mass under-reads motion by about 10% and each pass picks up most of what is left. Reproduce with `python benchmarks/drift.py`.
 
-| Peak motion (um) | Tetrode | Tetrode, interpolation | Tetrode, tracking | Tetrode, tracking from first 10 s | Linear 16-ch | Linear, interpolation | Drift estimate error (um) |
+| Peak motion (um) | Tetrode | Tetrode, interpolation | Tetrode, tracking | Tetrode, positions | Linear 16-ch | Linear, interpolation | Linear, positions |
 |---|---|---|---|---|---|---|---|
-| 0 | 0.99 | 0.99 | 0.99 | 0.99 | 1.00 | 1.00 | 0.6 |
-| 10 | 0.75 | 0.72 | 0.91 | 0.97 | 0.75 | 1.00 | 0.9 |
-| 20 | 0.59 | 0.70 | 0.62 | 0.65 | 0.57 | 1.00 | 0.8 |
-| 30 | 0.48 | 0.58 | 0.50 | 0.56 | 0.42 | 1.00 | 0.9 |
-| 40 | 0.40 | 0.53 | 0.40 | 0.36 | 0.38 | 1.00 | 0.9 |
+| 0 | 0.99 | 0.99 | 0.99 | 0.99 | 1.00 | 1.00 | 1.00 |
+| 10 | 0.75 | 0.72 | 0.91 | 0.99 | 0.75 | 1.00 | 1.00 |
+| 20 | 0.59 | 0.70 | 0.62 | 0.99 | 0.57 | 1.00 | 0.97 |
+| 30 | 0.48 | 0.58 | 0.50 | 0.90 | 0.42 | 1.00 | 0.89 |
+| 40 | 0.40 | 0.53 | 0.40 | 0.77 | 0.38 | 1.00 | 0.66 |
 
-Means of 2 seeds, 60 s recordings. On the linear probe the corrected accuracy at every motion level equals the no-motion accuracy, and the trajectory is recovered to within 1 um rms (the 0.6 um at zero motion is the estimator's own noise floor). Uncorrected, stage one reports 13 to 24 clusters for 8 neurons. The two tracking columns are Finding 8.
+Means of 2 seeds, 60 s recordings. On the linear probe the corrected accuracy at every motion level equals the no-motion accuracy, and the trajectory is recovered to within 1 um rms. Uncorrected, stage one reports 13 to 24 clusters for 8 neurons. The tracking column is Finding 8 and the two positions columns are Finding 9.
 
 ![Accuracy under drift](docs/img/drift.png)
 
@@ -193,11 +198,11 @@ Things that mattered:
 * **Units beyond the ends of the array break the estimate.** The first attempt used an 8-channel probe with units placed up to 15 um past its ends, and the estimated trajectory was off by 12 um rms. A unit beyond the last channel has a centre of mass pinned near that channel, and as it moves further away the centre of mass can even move the wrong way. Interior units on a 16-channel probe track motion at 0.89 um per um. Real probes are long, so this is mostly a short-array problem, but it is also why depth estimates need care near the ends.
 * **Read amplitudes at the trough, not as each channel's minimum.** The minimum over a 2 ms window of a noise-only channel is always a few sigma negative, which biased every spike towards the middle of the array and doubled the per-spike depth noise.
 * **Register all pairs of bins, not each bin against its predecessor.** Chaining neighbours accumulates error over the recording. The least-squares reconciliation of all pairs does not, and pairs of bins that share no units simply get a low weight.
-* **A tetrode cannot really be corrected this way.** Four channels on a square give no axis to interpolate along, and the kernel interpolant is a poor model of the field between them. Applied anyway, it recovers a part of the loss at 20 um and above (0.59 to 0.70 at 20 um, 0.40 to 0.53 at 40 um) and nothing at 10 um. Following templates over time is the tetrode answer, and Finding 8 is what came of that.
+* **A tetrode cannot really be corrected this way.** Four channels on a square give no axis to interpolate along, and the kernel interpolant is a poor model of the field between them. Applied anyway, it recovers a part of the loss at 20 um and above (0.59 to 0.70 at 20 um, 0.40 to 0.53 at 40 um) and nothing at 10 um. Following templates over time was the first tetrode answer (Finding 8), and working in position space the second (Finding 9).
 
 ### Finding 8: following templates over time helps a tetrode only sometimes
 
-A tetrode has no axis to interpolate along, so its drift answer has to be the Kilosort 1 one: let each template follow its neuron. `tracking.py` is an experimental stage two that processes the recording in 5 s chunks, moves each template towards the median of the spikes it just won (with the other units' spikes subtracted), merges templates that have become one neuron, and clusters whatever the templates could not explain to find units that appear late. `SortConfig(tracking=True)` turns it on. It is benchmarked above, as the two tracking columns.
+A tetrode has no axis to interpolate along, so its drift answer has to be the Kilosort 1 one: let each template follow its neuron. `tracking.py` is an experimental stage two that processes the recording in 5 s chunks, moves each template towards the median of the spikes it just won (with the other units' spikes subtracted), merges templates that have become one neuron, and clusters whatever the templates could not explain to find units that appear late. `SortConfig(tracking=True)` turns it on. It is benchmarked above, as the tracking column.
 
 It is a modest and unreliable gain, and the reason is instructive. A Gaussian mixture cuts a continuously drifting neuron into amplitude bands, and every band becomes a template that keeps winning the spikes in its own band, so nothing ever converges. Three ways of proving two bands are one neuron were tried, and each has a hole:
 
@@ -206,6 +211,32 @@ It is a modest and unreliable gain, and the reason is instructive. A Gaussian mi
 * **A density gap test** (the bands are adjacent slices of a continuum with no valley between them) works for a slow random walk and fails for oscillating drift, which dwells at its extremes and leaves a real valley. With a few hundred spikes per cluster it also cannot tell a continuum from two neurons at d' of 3. It is in `cluster.py` as `gap_ratio`, off by default.
 
 What does work is the handover: a template that has tracked its neuron onto a stale band's position becomes the same waveform as that band's template, and the two are merged on template similarity at that moment. Starting the templates from the first 10 s of the recording avoids most bands but costs precision (0.58 to 0.83 at 20 um and above), because a template occasionally drifts onto a different neuron and discovery adds junk. At 10 um of motion, where bands are rare, tracking takes the tetrode from 0.75 to 0.91, or 0.97 from the first 10 s. At 20 um and beyond the gain over no correction is a few hundredths. Long recordings help all of this: on a 120 s tetrode recording with 20 um of motion the full-recording variant reached 0.80 and the first-10-s variant 0.87, against 0.55 uncorrected.
+
+### Finding 9: a tetrode cannot say how far it moved, but it can say which spikes belong together
+
+![Stage-one clusters as amplitude trajectories, linked into units, and the drift time course](docs/img/trajectories.png)
+
+The tracking result said the problem was never the matching but the bands: a Gaussian mixture cuts a drifting neuron into pieces that are active at different times, and no amount of waveform comparison proves two pieces are one neuron, because they are different waveforms. What does connect them is geometry. A spike's amplitudes across channels say where its neuron is, so with a point-source model of the field (amplitude falls off as distance to the power 1.5, the same law the simulator uses) a cluster's mean profile in each 2 s bin gives the cluster's position in that bin, and the bins give its trajectory. `localize.py` does that for every cluster, links the trajectories that continue each other into units, renders each unit's template for every bin by scaling its channels along the unit's own trajectory, and matches bin by bin. `SortConfig(drift_correction=True, drift_method="positions")` turns it on, and it runs on any geometry.
+
+The first thing it found was a fact about tetrodes. With every channel the same distance from the centre, the amplitude profile is exactly invariant to moving the source along the ray from the centre while adjusting its height: a fit with the height free has a one-parameter family of solutions with zero residual, so the height cannot be recovered, nor the absolute scale of positions, nor the size of the drift. Four numbers per spike are not enough. A linear probe has channels at different distances from the centre, the degeneracy is gone, and the fit recovers the height to within a micron. The consequences on a tetrode run through the whole design:
+
+* **No displacement in microns.** `Sorting.drift` is left empty on a degenerate geometry. What can be read off is the drift's time course: in fitted-position space every unit moves radially, towards the centre when the array approaches it and away when it recedes, so each unit's radial excursion, signed by the side of the drift axis it sits on and scaled to unit variance, is an estimate of the drift's shape. Averaged over units it correlates with the true motion at 0.8 for 10 and 20 um of motion and 0.7 at 30 um (table below), with the amplitude unknown. The right panel of the figure shows it.
+* **No common frame for linking.** Fitted positions move by neuron-dependent amounts (a neuron near the array moves far in fitted space for a small real motion), so a rigid registration of the trajectories, which is exactly right on a probe, means nothing on a tetrode. Two pieces of one neuron are instead linked by continuity: each one's trajectory is extrapolated across the gap, the model renders the profile it predicts there, and the piece on the other side has to match it to within 40%. On a probe the extrapolation follows the rigid drift, on a tetrode a line in time. Both pieces also need the same waveform time course on their loudest channel (correlation above 0.97), and this is the weakest of the three tests, because real neurons can share a time course.
+* **The strongest cue is that a neuron is in one place at a time.** Two pieces of one neuron are never active in the same bin except while it crosses between them, and two neurons that both fire are active together throughout. Candidate links are made best first, and a link is refused when the two groups it would join fire in the same bins more than 30% of the time. Once a neuron's pieces are together they cover the recording, so a neighbouring piece that happens to continue one of them is kept out by the whole. This is what makes the linking robust to the thresholds above.
+* **The model sets the shape of a rendered template, the data its size.** Scaling a template by the model's gain ratios between two positions gets the profile shape right (3% error) and the size wrong by up to 60%, because the ratio depends on the height the model cannot know. Each bin's template is therefore rendered with the model's shape and the amplitude the cluster was measured at in that bin, interpolated where it had no spikes.
+* **A drifting unit looks like a collision cluster.** The composite-cluster test compares each spike with its cluster's median and drops the cluster if half the spikes are far from it, which is exactly what drift produces. Under this method each spike is compared with the median of its ten nearest neighbours in time instead, and a real unit passes while a collision cluster still fails.
+
+The results are in the table of Finding 7 (`python benchmarks/drift.py`, 60 s recordings, means of 2 seeds). On the tetrode the method takes 10 um of motion from 0.75 to 0.99 and 20 um from 0.59 to 0.99, with 5 units found for 5 neurons where the uncorrected sorter reports 10 to 11, and precision stays at 1.00. At 30 um it holds 0.90 and at 40 um 0.77, against 0.53 for the best of the earlier methods. On the linear probe it equals the interpolation method up to 20 um and falls behind it at 30 and 40 um (0.89 and 0.66 against 1.00). The reason is the order of operations: interpolation corrects the data before clustering, so stage one sees static neurons, while this method clusters the drifting data first and inherits whatever stage one got wrong. Where the fitted positions share a frame, the rigid registration of the trajectories is a drift estimate in microns, and up to 20 um of motion it is a better one than the centre-of-mass estimate of Finding 7.
+
+| Peak motion (um) | Linear, interpolation: drift error (um rms) | Linear, positions: drift error (um rms) | Tetrode, positions: correlation of the drift shape with the truth |
+|---|---|---|---|
+| 0 | 0.6 | 0.2 | |
+| 10 | 0.9 | 0.3 | 0.79 |
+| 20 | 0.8 | 0.9 | 0.81 |
+| 30 | 0.9 | 1.9 | 0.67 |
+| 40 | 0.9 | 10.6 | 0.20 |
+
+Where it stops working is stage one. At 40 um of motion on a tetrode, and from 30 um on the linear probe with 8 neurons, the pieces of different neurons cross in feature space and the mixture model merges them, so several of the largest clusters are chimeras of two neurons before the linking starts (purity 0.5 to 0.6 against the ground truth). Nothing downstream can undo that, and the fix is a clustering that knows about time, which is the next step below.
 
 ## Running on other data
 
@@ -226,30 +257,32 @@ The two `--generate` modes use SpikeInterface's own generators, which differ fro
 | 4 channels, 6 units, 30 s, static | 0.994 | 0.994 |
 | 16-channel linear, 8 units, 60 s, static | 1.000 | |
 | same, 20 um zigzag drift, uncorrected | 0.589 | |
-| same, drift corrected | 0.927 | |
+| same, drift corrected by interpolation | 0.927 | |
+| same, drift handled in position space | 0.738 | |
 
-The corrected drift result is lower than on our simulator (0.997 for the matching condition). One seed and one generator are not enough to say why. The zigzag's sharp turnarounds and the steeper ellipsoid falloff are the suspects.
+The interpolation result is lower than on our simulator (0.997 for the matching condition). One seed and one generator are not enough to say why. The zigzag's sharp turnarounds and the steeper ellipsoid falloff are the suspects. The position-space method (Finding 9) lands between the two on this generator, as it does on our own linear probe at larger motion: on a probe, correcting the data before clustering is the better order.
 
 ## Known limitations
 
 * **Knife-edge pairs.** Two units on the same channel with the same amplitude and templates correlating above 0.96 sit at the limit of what stage one can split. The split pass handles the cases in the benchmark, but whether BIC separates such a pair in the first place depends on details of the event set.
 * **Crowded probes.** With 8 to 10 units on 4 channels, accuracy settles at 0.97 and collision recall at 0.84 to 0.89, the same as with true templates. The residual errors are confusions between similar templates inside collisions, and more channels would be the real fix.
 * **Amplitude variation.** The simulator gives every spike of a unit the same amplitude. Real units burst with decaying amplitudes, which the 0.8 to 1.25 amplitude window and the detection step are not tuned for.
-* **Drift is rigid, along one axis, and only reliably correctable on a linear array.** The estimate is one displacement per time bin for the whole probe. Real drift can differ along a long probe (non-rigid), and on a tetrode the template-tracking alternative is partial (Finding 8). The estimator also needs units inside the array.
+* **Drift is rigid and along one axis.** The interpolation estimate is one displacement per time bin for the whole probe, and it needs units inside the array. Real drift can differ along a long probe (non-rigid). The position-space method does not assume rigid motion, but on a tetrode it handles up to about 20 um of motion in a 60 s recording and then runs into stage one (Finding 9), and it cannot report the motion in microns there at all.
 * **Short recordings.** Several of the tests that would separate drift from a second neuron (refractoriness above all) need minutes of data. The 60 s benchmarks are at the wrong end of that.
 * **Simulated data only so far.** The simulator is simple: Gaussian-shaped spikes, a monopole-like falloff, no bursting.
 
 ## Next steps
 
 * Real hybrid ground-truth recordings (SpikeForest, MEArec) through `benchmarks/real_data.py`, on a machine that can download them.
-* Tetrode drift: initialise tracking from a short window, then grow the recording length until the refractoriness test has power. Or a different clustering for drifting data altogether, such as clustering in time-sliced windows and linking.
+* Stage one that knows about time, for large drift: cluster in time-sliced windows and link the slices with the continuity test of `localize.py`, so that two neurons whose drift paths cross in feature space are never merged in the first place.
+* Real tetrode recordings with drift, through `benchmarks/real_data.py`, to see whether the point-source model and the linking thresholds hold up outside the simulator.
 * Bursting with amplitude decay in the simulator, and a matching step tuned for it.
 
 ## Project layout
 
 ```
 src/spikesort/      the package
-tests/              pytest suite (34 tests: unit tests per stage plus end-to-end)
+tests/              pytest suite (40 tests: unit tests per stage plus end-to-end)
 benchmarks/         sweep.py, alignment.py, drift.py and real_data.py, results in benchmarks/results/
 docs/img/           figures used in this README
 ```

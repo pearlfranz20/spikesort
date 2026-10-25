@@ -37,11 +37,11 @@
     "probe": "tetrode",
     "motion": 0,
     "seed": 0,
-    "mode": "tracked_init10",
-    "accuracy": 0.9842324670053555,
-    "precision": 0.9943580561052997,
-    "recall": 0.9897946548737444,
-    "n_found": 5,
+    "mode": "positions",
+    "accuracy": 0.9865396442364082,
+    "precision": 0.9951353558193581,
+    "recall": 0.9913812867675033,
+    "n_found": 6,
     "n_units": 5
   },
   {
@@ -82,11 +82,11 @@
     "probe": "tetrode",
     "motion": 0,
     "seed": 1,
-    "mode": "tracked_init10",
-    "accuracy": 0.9976800188041842,
-    "precision": 0.9996742671009772,
-    "recall": 0.998005751703207,
-    "n_found": 5,
+    "mode": "positions",
+    "accuracy": 0.9986950988509082,
+    "precision": 1.0,
+    "recall": 0.9986950988509082,
+    "n_found": 6,
     "n_units": 5
   },
   {
@@ -127,12 +127,13 @@
     "probe": "tetrode",
     "motion": 10,
     "seed": 0,
-    "mode": "tracked_init10",
-    "accuracy": 0.9736892596581569,
-    "precision": 0.9826353558193581,
-    "recall": 0.9908974324042349,
-    "n_found": 5,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.9847869603206652,
+    "precision": 0.9944128460547403,
+    "recall": 0.9902785092370128,
+    "n_found": 6,
+    "n_units": 5,
+    "drift_shape_corr": 0.8488465917424985
   },
   {
     "probe": "tetrode",
@@ -172,12 +173,13 @@
     "probe": "tetrode",
     "motion": 10,
     "seed": 1,
-    "mode": "tracked_init10",
-    "accuracy": 0.9578314959740869,
-    "precision": 0.961068871817931,
-    "recall": 0.9964487225250483,
-    "n_found": 6,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.9983184082383783,
+    "precision": 0.9988714296882218,
+    "recall": 0.9994469785501565,
+    "n_found": 5,
+    "n_units": 5,
+    "drift_shape_corr": 0.73994272650909
   },
   {
     "probe": "tetrode",
@@ -217,12 +219,13 @@
     "probe": "tetrode",
     "motion": 20,
     "seed": 0,
-    "mode": "tracked_init10",
-    "accuracy": 0.5803598702730967,
-    "precision": 0.6014767359543668,
-    "recall": 0.7623945297014302,
-    "n_found": 4,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.986579482161328,
+    "precision": 0.9948027382453611,
+    "recall": 0.9917767439159668,
+    "n_found": 5,
+    "n_units": 5,
+    "drift_shape_corr": 0.8297392042232492
   },
   {
     "probe": "tetrode",
@@ -262,12 +265,13 @@
     "probe": "tetrode",
     "motion": 20,
     "seed": 1,
-    "mode": "tracked_init10",
-    "accuracy": 0.7147028412687886,
-    "precision": 0.8155336245368678,
-    "recall": 0.8529568344734028,
+    "mode": "positions",
+    "accuracy": 0.9951742386276642,
+    "precision": 0.9971444905501269,
+    "recall": 0.998025924085382,
     "n_found": 5,
-    "n_units": 5
+    "n_units": 5,
+    "drift_shape_corr": 0.7899634271342039
   },
   {
     "probe": "tetrode",
@@ -307,12 +311,13 @@
     "probe": "tetrode",
     "motion": 30,
     "seed": 0,
-    "mode": "tracked_init10",
-    "accuracy": 0.5248960618693138,
-    "precision": 0.84643080274414,
-    "recall": 0.6099284885257823,
-    "n_found": 7,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.9382534249795731,
+    "precision": 0.9792690763807581,
+    "recall": 0.9588535897220944,
+    "n_found": 5,
+    "n_units": 5,
+    "drift_shape_corr": 0.757283201081067
   },
   {
     "probe": "tetrode",
@@ -352,12 +357,13 @@
     "probe": "tetrode",
     "motion": 30,
     "seed": 1,
-    "mode": "tracked_init10",
-    "accuracy": 0.5923737247943925,
-    "precision": 0.8073837989932212,
-    "recall": 0.7110666815043051,
-    "n_found": 7,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.8624593161029679,
+    "precision": 0.978868229301588,
+    "recall": 0.8704958184643188,
+    "n_found": 6,
+    "n_units": 5,
+    "drift_shape_corr": 0.5755731352389716
   },
   {
     "probe": "tetrode",
@@ -397,12 +403,13 @@
     "probe": "tetrode",
     "motion": 40,
     "seed": 0,
-    "mode": "tracked_init10",
-    "accuracy": 0.43859753168936716,
-    "precision": 0.6930698075416701,
-    "recall": 0.5780188317202766,
-    "n_found": 6,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.7605033184630211,
+    "precision": 0.9088668091870972,
+    "recall": 0.8187912077166818,
+    "n_found": 7,
+    "n_units": 5,
+    "drift_shape_corr": 0.6142177240573606
   },
   {
     "probe": "tetrode",
@@ -442,12 +449,13 @@
     "probe": "tetrode",
     "motion": 40,
     "seed": 1,
-    "mode": "tracked_init10",
-    "accuracy": 0.2793512529029709,
-    "precision": 0.47408153659877855,
-    "recall": 0.4303388286998461,
-    "n_found": 6,
-    "n_units": 5
+    "mode": "positions",
+    "accuracy": 0.7717279409031267,
+    "precision": 0.8877371534047513,
+    "recall": 0.8612035604411725,
+    "n_found": 5,
+    "n_units": 5,
+    "drift_shape_corr": -0.21216313873120046
   },
   {
     "probe": "linear16",
@@ -475,6 +483,18 @@
   {
     "probe": "linear16",
     "motion": 0,
+    "seed": 0,
+    "mode": "positions",
+    "accuracy": 0.9946568728813482,
+    "precision": 0.9981143595154724,
+    "recall": 0.9965186662754093,
+    "n_found": 8,
+    "n_units": 8,
+    "drift_rms_error_um": 0.1728611979443948
+  },
+  {
+    "probe": "linear16",
+    "motion": 0,
     "seed": 1,
     "mode": "plain",
     "accuracy": 0.9984882981593043,
@@ -494,6 +514,18 @@
     "n_found": 9,
     "n_units": 8,
     "drift_rms_error_um": 0.6551505217825141
+  },
+  {
+    "probe": "linear16",
+    "motion": 0,
+    "seed": 1,
+    "mode": "positions",
+    "accuracy": 0.9984882981593043,
+    "precision": 1.0,
+    "recall": 0.9984882981593043,
+    "n_found": 9,
+    "n_units": 8,
+    "drift_rms_error_um": 0.23068013771446255
   },
   {
     "probe": "linear16",
@@ -521,6 +553,18 @@
   {
     "probe": "linear16",
     "motion": 10,
+    "seed": 0,
+    "mode": "positions",
+    "accuracy": 0.9934896868265595,
+    "precision": 0.9974353028833547,
+    "recall": 0.9960246906691962,
+    "n_found": 8,
+    "n_units": 8,
+    "drift_rms_error_um": 0.2370272689738791
+  },
+  {
+    "probe": "linear16",
+    "motion": 10,
     "seed": 1,
     "mode": "plain",
     "accuracy": 0.7549730875227681,
@@ -540,6 +584,18 @@
     "n_found": 8,
     "n_units": 8,
     "drift_rms_error_um": 0.9627573225389615
+  },
+  {
+    "probe": "linear16",
+    "motion": 10,
+    "seed": 1,
+    "mode": "positions",
+    "accuracy": 0.9981218342233862,
+    "precision": 0.9998374512353706,
+    "recall": 0.9982843829880156,
+    "n_found": 9,
+    "n_units": 8,
+    "drift_rms_error_um": 0.45521563885891436
   },
   {
     "probe": "linear16",
@@ -567,6 +623,18 @@
   {
     "probe": "linear16",
     "motion": 20,
+    "seed": 0,
+    "mode": "positions",
+    "accuracy": 0.9938194237314724,
+    "precision": 0.9978445570989248,
+    "recall": 0.9959467031021831,
+    "n_found": 8,
+    "n_units": 8,
+    "drift_rms_error_um": 0.74530995898667
+  },
+  {
+    "probe": "linear16",
+    "motion": 20,
     "seed": 1,
     "mode": "plain",
     "accuracy": 0.5236502509972112,
@@ -586,6 +654,18 @@
     "n_found": 8,
     "n_units": 8,
     "drift_rms_error_um": 0.7803385110240049
+  },
+  {
+    "probe": "linear16",
+    "motion": 20,
+    "seed": 1,
+    "mode": "positions",
+    "accuracy": 0.9543449428600382,
+    "precision": 0.9994689716634925,
+    "recall": 0.9548704537264774,
+    "n_found": 10,
+    "n_units": 8,
+    "drift_rms_error_um": 1.0125406550792446
   },
   {
     "probe": "linear16",
@@ -613,6 +693,18 @@
   {
     "probe": "linear16",
     "motion": 30,
+    "seed": 0,
+    "mode": "positions",
+    "accuracy": 0.9087850975771447,
+    "precision": 0.9984678895454405,
+    "recall": 0.9100007955132808,
+    "n_found": 11,
+    "n_units": 8,
+    "drift_rms_error_um": 2.0840958176957813
+  },
+  {
+    "probe": "linear16",
+    "motion": 30,
     "seed": 1,
     "mode": "plain",
     "accuracy": 0.40883152775352855,
@@ -632,6 +724,18 @@
     "n_found": 8,
     "n_units": 8,
     "drift_rms_error_um": 0.8763730824799728
+  },
+  {
+    "probe": "linear16",
+    "motion": 30,
+    "seed": 1,
+    "mode": "positions",
+    "accuracy": 0.8785260278867422,
+    "precision": 0.9995136186770428,
+    "recall": 0.8790124092096994,
+    "n_found": 11,
+    "n_units": 8,
+    "drift_rms_error_um": 1.711929522845556
   },
   {
     "probe": "linear16",
@@ -659,6 +763,18 @@
   {
     "probe": "linear16",
     "motion": 40,
+    "seed": 0,
+    "mode": "positions",
+    "accuracy": 0.47347795631752043,
+    "precision": 0.7195603801637841,
+    "recall": 0.5884195151338811,
+    "n_found": 13,
+    "n_units": 8,
+    "drift_rms_error_um": 18.939724612670627
+  },
+  {
+    "probe": "linear16",
+    "motion": 40,
     "seed": 1,
     "mode": "plain",
     "accuracy": 0.3991558069933789,
@@ -678,5 +794,17 @@
     "n_found": 9,
     "n_units": 8,
     "drift_rms_error_um": 0.8392496425205165
+  },
+  {
+    "probe": "linear16",
+    "motion": 40,
+    "seed": 1,
+    "mode": "positions",
+    "accuracy": 0.8508995869438343,
+    "precision": 0.9924979924979925,
+    "recall": 0.8575742264517618,
+    "n_found": 10,
+    "n_units": 8,
+    "drift_rms_error_um": 2.163549961644418
   }
 ]
