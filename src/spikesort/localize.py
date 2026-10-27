@@ -164,8 +164,14 @@ def cluster_trajectories(
     falloff: float = 1.5,
     fixed_z: float = 15.0,
     min_spikes: int = 6,
+    max_pool_bins: int = 3,
 ) -> dict[int, Trajectory]:
     """Fit every cluster's position in every bin where it has `min_spikes` spikes.
+
+    A cluster that fires too sparsely for that pools consecutive bins, up
+    to `max_pool_bins` of them, until it has `min_spikes` (`_pool_bins`),
+    so a unit at a few hertz still gets a point every few seconds instead
+    of losing every bin where Poisson chance gave it one spike too few.
 
     The height is fitted once per cluster from its whole-recording mean
     profile (with 16 channels it is well determined), or held at
@@ -183,15 +189,14 @@ def cluster_trajectories(
             _, z, _, _ = fit_position(profiles[m].mean(axis=0), geom, falloff)
         bins, pos, amps, counts, means, strengths = [], [], [], [], [], []
         s_prev = None
-        for b in np.unique(which[m]):
-            mb = m & (which == b)
+        for group in _pool_bins(which[m], min_spikes, max_pool_bins):
+            mb = m & np.isin(which, group)
             n = int(mb.sum())
-            if n < min_spikes:
-                continue
             mean = profiles[mb].mean(axis=0)
             s, _, a, _ = fit_position(mean, geom, falloff, z=z, s0=s_prev)
             s_prev = s
-            bins.append(int(b))
+            # A pooled point sits at the bin holding its median spike.
+            bins.append(int(np.median(which[mb])))
             pos.append(s)
             amps.append(a * geom.gains(s, z, falloff).max())
             counts.append(n)
@@ -202,6 +207,27 @@ def cluster_trajectories(
                                  np.array(amps), np.array(counts, dtype=np.int64), float(z),
                                  np.array(means).reshape(-1, profiles.shape[1]), np.array(strengths))
     return out
+
+
+def _pool_bins(which: np.ndarray, min_spikes: int, max_pool_bins: int) -> list[list[int]]:
+    """Consecutive bins grouped until each group has `min_spikes` spikes.
+
+    `which` is the bin of every spike of one cluster. Groups span at most
+    `max_pool_bins` bins. A run that cannot reach `min_spikes` within that
+    span is abandoned and the search restarts at its later bins.
+    """
+    present, counts = np.unique(which, return_counts=True)
+    groups, cur, n = [], [], 0
+    for b, c in zip(present.tolist(), counts.tolist(), strict=True):
+        cur.append(b)
+        n += c
+        while cur and cur[-1] - cur[0] + 1 > max_pool_bins:
+            n -= int(counts[present == cur[0]][0])
+            cur.pop(0)
+        if n >= min_spikes:
+            groups.append(cur)
+            cur, n = [], 0
+    return groups
 
 
 def shape_correlation(ta: np.ndarray, tb: np.ndarray) -> float:
