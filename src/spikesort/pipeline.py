@@ -69,9 +69,8 @@ class SortConfig:
     link_max_profile_dist: float = 0.4  # relative profile mismatch where two trajectories meet
     link_min_shape_corr: float = 0.97  # waveform time course agreement on the loudest channel
     link_max_gap_bins: int = 2  # trajectories further apart in time than this never meet
-    link_max_coactivity: float = 0.3  # bands of one neuron do not fire in the same bins
+    link_max_coactivity: float = 0.45  # bands of one neuron rarely fire in the same bins
     traj_pool_bins: int = 3  # a sparse cluster pools up to this many bins per trajectory point
-    cluster_window_s: float | None = None  # stage one per time window, pieces linked later (positions)
     tracking: bool = False  # chunked stage two with templates that follow the units, see tracking.py
     track_chunk_s: float = 5.0
     track_alpha: float = 0.5  # how far a template moves towards each chunk's median
@@ -163,10 +162,7 @@ def sort(data: np.ndarray, fs: float, config: SortConfig | None = None,
     wf, times = extract_waveforms(x, times, fs, cfg.pre_ms, cfg.post_ms, align=cfg.align)
     feats, models = waveform_features(wf, cfg.n_pcs, per_channel=cfg.per_channel_pca)
 
-    if cfg.cluster_window_s is not None:
-        labels, bic = cluster_in_windows(wf, feats, times, fs, cfg)
-    else:
-        labels, bic = cluster_stage_one(wf, feats, cfg)
+    labels, bic = cluster_stage_one(wf, feats, cfg)
     cluster_templates = templates_from_labels(wf, labels)
     stage1 = {"times": times, "labels": labels, "n_clusters": len(cluster_templates)}
 
@@ -262,39 +258,6 @@ def cluster_stage_one(wf: np.ndarray, feats: np.ndarray, cfg: SortConfig) -> tup
         labels = split_bimodal(wf, labels, feats, cfg.split_dprime, seed=cfg.seed)
     labels = merge_similar(wf, labels, cfg.merge_corr, cfg.merge_amp_ratio, cfg.merge_dprime)
     return labels, bic
-
-
-def cluster_in_windows(wf: np.ndarray, feats: np.ndarray, times: np.ndarray, fs: float,
-                       cfg: SortConfig) -> tuple[np.ndarray, dict]:
-    """Stage one run separately in consecutive windows of `cfg.cluster_window_s`.
-
-    Within a short window a drifting neuron has barely moved, so it is one
-    compact cluster, and two neurons whose drift paths cross over the
-    recording are still apart. Every window's clusters get labels of their
-    own and the pieces are joined later by the trajectory linking of the
-    "positions" drift method (localize.py). The PCA axes are shared, fitted
-    on the whole recording. A window with too few spikes for a mixture is
-    one cluster.
-    """
-    win = max(1, int(round(cfg.cluster_window_s * fs)))
-    which = (times // win).astype(np.int64)
-    labels = np.zeros(times.size, dtype=np.int64)
-    info = {"windows": [], "k": 0}
-    offset = 0
-    for w in np.unique(which):
-        m = which == w
-        if m.sum() < 4 * cfg.min_template_spikes:
-            lab = np.zeros(int(m.sum()), dtype=np.int64)
-            k = 1
-        else:
-            lab, b = cluster_stage_one(wf[m], feats[m], cfg)
-            k = int(b["k"])
-        _, lab = np.unique(lab, return_inverse=True)
-        labels[m] = lab + offset
-        offset += int(lab.max()) + 1
-        info["windows"].append({"window": int(w), "n_spikes": int(m.sum()), "k": k})
-    info["k"] = offset
-    return labels, info
 
 
 def _detect(x: np.ndarray, fs: float, noise: np.ndarray | None, cfg: SortConfig) -> np.ndarray:

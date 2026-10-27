@@ -316,7 +316,7 @@ def link_trajectories(
     max_profile_dist: float = 0.4,
     min_shape_corr: float = 0.97,
     max_gap_bins: int = 2,
-    max_coactivity: float = 0.3,
+    max_coactivity: float = 0.45,
     falloff: float = 1.5,
     displacement: np.ndarray | None = None,
 ) -> list[list[int]]:
