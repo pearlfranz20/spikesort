@@ -185,9 +185,9 @@ The correction follows Kilosort 2.5. Every detected spike gets a depth, the cent
 |---|---|---|---|---|---|---|---|
 | 0 | 0.99 | 0.99 | 0.99 | 0.99 | 1.00 | 1.00 | 1.00 |
 | 10 | 0.75 | 0.72 | 0.91 | 0.99 | 0.75 | 1.00 | 1.00 |
-| 20 | 0.59 | 0.70 | 0.62 | 0.99 | 0.57 | 1.00 | 0.97 |
-| 30 | 0.48 | 0.58 | 0.50 | 0.90 | 0.42 | 1.00 | 0.89 |
-| 40 | 0.40 | 0.53 | 0.40 | 0.77 | 0.38 | 1.00 | 0.66 |
+| 20 | 0.59 | 0.70 | 0.62 | 0.99 | 0.57 | 1.00 | 1.00 |
+| 30 | 0.48 | 0.58 | 0.50 | 0.96 | 0.42 | 1.00 | 0.93 |
+| 40 | 0.40 | 0.53 | 0.40 | 0.77 | 0.38 | 1.00 | 0.65 |
 
 Means of 2 seeds, 60 s recordings. On the linear probe the corrected accuracy at every motion level equals the no-motion accuracy, and the trajectory is recovered to within 1 um rms. Uncorrected, stage one reports 13 to 24 clusters for 8 neurons. The tracking column is Finding 8 and the two positions columns are Finding 9.
 
@@ -220,22 +220,22 @@ The tracking result said the problem was never the matching but the bands: a Gau
 
 The first thing it found was a fact about tetrodes. With every channel the same distance from the centre, the amplitude profile is exactly invariant to moving the source along the ray from the centre while adjusting its height: a fit with the height free has a one-parameter family of solutions with zero residual, so the height cannot be recovered, nor the absolute scale of positions, nor the size of the drift. Four numbers per spike are not enough. A linear probe has channels at different distances from the centre, the degeneracy is gone, and the fit recovers the height to within a micron. The consequences on a tetrode run through the whole design:
 
-* **No displacement in microns.** `Sorting.drift` is left empty on a degenerate geometry. What can be read off is the drift's time course: in fitted-position space every unit moves radially, towards the centre when the array approaches it and away when it recedes, so each unit's radial excursion, signed by the side of the drift axis it sits on and scaled to unit variance, is an estimate of the drift's shape. Averaged over units it correlates with the true motion at 0.8 for 10 and 20 um of motion and 0.7 at 30 um (table below), with the amplitude unknown. The right panel of the figure shows it.
+* **No displacement in microns.** `Sorting.drift` is left empty on a degenerate geometry. What can be read off is the drift's time course: in fitted-position space every unit moves radially, towards the centre when the array approaches it and away when it recedes, so each unit's radial excursion, signed by the side of the drift axis it sits on and scaled to unit variance, is an estimate of the drift's shape. Averaged over units it correlates with the true motion at about 0.8 up to 30 um of motion (table below), with the amplitude unknown. The right panel of the figure shows it.
 * **No common frame for linking.** Fitted positions move by neuron-dependent amounts (a neuron near the array moves far in fitted space for a small real motion), so a rigid registration of the trajectories, which is exactly right on a probe, means nothing on a tetrode. Two pieces of one neuron are instead linked by continuity: each one's trajectory is extrapolated across the gap, the model renders the profile it predicts there, and the piece on the other side has to match it to within 40%. On a probe the extrapolation follows the rigid drift, on a tetrode a line in time. Both pieces also need the same waveform time course on their loudest channel (correlation above 0.97), and this is the weakest of the three tests, because real neurons can share a time course.
 * **The strongest cue is that a neuron is in one place at a time.** Two pieces of one neuron are never active in the same bin except while it crosses between them, and two neurons that both fire are active together throughout. Candidate links are made best first, and a link is refused when the two groups it would join fire in the same bins more than 45% of the time (true pieces reach about 0.4 when a band boundary sits near a motion extreme, where the neuron dwells; false pairs that pass the other tests sit at 0.75 to 0.99). Once a neuron's pieces are together they cover the recording, so a neighbouring piece that happens to continue one of them is kept out by the whole. This is what makes the linking robust to the thresholds above.
 * **The model sets the shape of a rendered template, the data its size.** Scaling a template by the model's gain ratios between two positions gets the profile shape right (3% error) and the size wrong by up to 60%, because the ratio depends on the height the model cannot know. Each bin's template is therefore rendered with the model's shape and the amplitude the cluster was measured at in that bin, interpolated where it had no spikes.
 * **Sparse units need pooled bins.** A trajectory point needs six spikes, and a unit firing at 3 Hz has about six per 2 s bin, so Poisson chance drops half its bins and its pieces never meet. A sparse cluster now pools up to three consecutive bins per point.
 * **A drifting unit looks like a collision cluster.** The composite-cluster test compares each spike with its cluster's median and drops the cluster if half the spikes are far from it, which is exactly what drift produces. Under this method each spike is compared with the median of its ten nearest neighbours in time instead, and a real unit passes while a collision cluster still fails.
 
-The results are in the table of Finding 7 (`python benchmarks/drift.py`, 60 s recordings, means of 2 seeds). On the tetrode the method takes 10 um of motion from 0.75 to 0.99 and 20 um from 0.59 to 0.99, with 5 units found for 5 neurons where the uncorrected sorter reports 10 to 11, and precision stays at 1.00. At 30 um it holds 0.90 and at 40 um 0.77, against 0.53 for the best of the earlier methods. On the linear probe it equals the interpolation method up to 20 um and falls behind it at 30 and 40 um (0.89 and 0.66 against 1.00). The reason is the order of operations: interpolation corrects the data before clustering, so stage one sees static neurons, while this method clusters the drifting data first and inherits whatever stage one got wrong. Where the fitted positions share a frame, the rigid registration of the trajectories is a drift estimate in microns, and up to 20 um of motion it is a better one than the centre-of-mass estimate of Finding 7.
+The results are in the table of Finding 7 (`python benchmarks/drift.py`, 60 s recordings, means of 2 seeds). On the tetrode the method takes 10 um of motion from 0.75 to 0.99 and 20 um from 0.59 to 0.99, with 5 units found for 5 neurons where the uncorrected sorter reports 10 to 11, and precision stays at 1.00. At 30 um it holds 0.96 and at 40 um 0.77, against 0.53 for the best of the earlier methods. On the linear probe it equals the interpolation method up to 20 um and falls behind it at 30 and 40 um (0.93 and 0.65 against 1.00). The reason is the order of operations: interpolation corrects the data before clustering, so stage one sees static neurons, while this method clusters the drifting data first and inherits whatever stage one got wrong. Where the fitted positions share a frame, the rigid registration of the trajectories is a drift estimate in microns, and up to 20 um of motion it is a better one than the centre-of-mass estimate of Finding 7.
 
 | Peak motion (um) | Linear, interpolation: drift error (um rms) | Linear, positions: drift error (um rms) | Tetrode, positions: correlation of the drift shape with the truth |
 |---|---|---|---|
 | 0 | 0.6 | 0.2 | |
-| 10 | 0.9 | 0.3 | 0.79 |
-| 20 | 0.8 | 0.9 | 0.81 |
-| 30 | 0.9 | 1.9 | 0.67 |
-| 40 | 0.9 | 10.6 | 0.20 |
+| 10 | 0.9 | 0.3 | 0.78 |
+| 20 | 0.8 | 0.8 | 0.80 |
+| 30 | 0.9 | 2.1 | 0.77 |
+| 40 | 0.9 | 11.5 | 0.19 |
 
 Where it stops working is stage one. At 40 um of motion, two neurons whose drift paths cross in feature space are merged by the mixture model where they cross, and at that moment they look alike to every test here, so the merged piece is linked into one of them and steals the other's spikes in those bins. A low-rate neuron that moves far from the array also drops below detection for part of the recording, and its pieces on either side of the gap never meet.
 
